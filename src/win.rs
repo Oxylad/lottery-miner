@@ -16,6 +16,53 @@ unsafe extern "system" {
     fn IsIconic(hwnd: isize) -> i32;
 }
 
+#[repr(C)]
+struct LastInputInfo {
+    cb_size: u32,
+    dw_time: u32,
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetLastInputInfo(plii: *mut LastInputInfo) -> i32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetTickCount() -> u32;
+    fn SetThreadExecutionState(flags: u32) -> u32;
+}
+
+const ES_CONTINUOUS: u32 = 0x8000_0000;
+const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+
+/// Seconds since the last keyboard or mouse input in this session.
+pub fn idle_seconds() -> u64 {
+    let mut info = LastInputInfo {
+        cb_size: std::mem::size_of::<LastInputInfo>() as u32,
+        dw_time: 0,
+    };
+    unsafe {
+        if GetLastInputInfo(&mut info) == 0 {
+            return 0;
+        }
+        // Both are 32-bit millisecond tick counts; wrapping_sub handles rollover.
+        (GetTickCount().wrapping_sub(info.dw_time) / 1000) as u64
+    }
+}
+
+/// Keeps the PC from sleeping (the display may still turn off) while `on`.
+/// Applies to the calling thread, so call it from the GPUI main thread.
+pub fn keep_awake(on: bool) {
+    unsafe {
+        SetThreadExecutionState(if on {
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        } else {
+            ES_CONTINUOUS
+        });
+    }
+}
+
 pub fn hide_window(hwnd: isize) {
     unsafe {
         ShowWindow(hwnd, SW_HIDE);

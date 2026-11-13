@@ -9,7 +9,8 @@ use crate::input::TextInput;
 use crate::miner::{self, InstanceHandle, Miner};
 use crate::network::{self, Network, PoolUser};
 use crate::remote::{self, OxyhomeStats, ServiceAction};
-use crate::settings::{self, Settings};
+use crate::settings::{self, IdleAction, Settings};
+use crate::logbook::{self, Filter, SharedLog, Source};
 use crate::win;
 
 /// Pool and mempool numbers change slowly; no need to ask more often.
@@ -45,6 +46,14 @@ pub struct Dashboard {
     /// The GPU miner process (gpu-miner.exe), separate from the CPU instances.
     pub gpu_miner: Miner,
     pub gpu: Option<InstanceView>,
+    /// Seconds since the last keyboard/mouse input.
+    pub idle_secs: u64,
+    /// Miners that idle mode started (and will stop on input).
+    pub idle_cpu: bool,
+    pub idle_gpu: bool,
+    /// Idle mode already tried to start in this idle period.
+    idle_tried: bool,
+    idle_awake: bool,
     pub pool: Option<Result<Option<PoolUser>, String>>,
     pub network: Option<Result<Network, String>>,
     pub oxyhome: Option<Result<OxyhomeStats, String>>,
@@ -52,8 +61,19 @@ pub struct Dashboard {
     pub oxyhome_due: Instant,
     pub network_due: Instant,
     pub message: Option<String>,
+    /// Everything the miners, the server and the app logged (Logs tab).
+    pub logbook: SharedLog,
+    pub view: View,
+    pub log_filter: Option<Filter>,
+    last_server_error: Option<String>,
     pub hwnd: Option<isize>,
     pub form: Form,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Dashboard,
+    Logs,
 }
 
 /// Text fields of the settings page.
@@ -128,14 +148,20 @@ impl Dashboard {
             Err(e) => (Settings::default(), Some(format!("{e} (using defaults)"))),
         };
         let form = Form::new(&settings, cx);
+        let book = logbook::shared();
         let mut this = Self {
             form,
             settings,
             settings_path,
-            miner: Miner::default(),
+            miner: Miner::with_log(book.clone()),
             local: Vec::new(),
-            gpu_miner: Miner::default(),
+            gpu_miner: Miner::with_log(book.clone()),
             gpu: None,
+            idle_secs: 0,
+            idle_cpu: false,
+            idle_gpu: false,
+            idle_tried: false,
+            idle_awake: false,
             pool: None,
             network: None,
             oxyhome: None,
@@ -143,6 +169,10 @@ impl Dashboard {
             oxyhome_due: Instant::now(),
             network_due: Instant::now(),
             message,
+            logbook: book,
+            view: View::Dashboard,
+            log_filter: None,
+            last_server_error: None,
             hwnd: None,
         };
         if this.settings.start_mining_on_launch {
@@ -153,7 +183,106 @@ impl Dashboard {
         }
         Self::spawn_local_loop(cx);
         Self::spawn_slow_loop(cx);
+        Self::spawn_idle_loop(cx);
         this
+    }
+
+    /// Idle mode, every 2 s on the main thread (keep_awake is per thread).
+    fn spawn_idle_loop(cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                if this
+                    .update(cx, |d, cx| {
+                        d.idle_tick();
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        })
+        .detach();
+    }
+
+    pub fn idle_tick(&mut self) {
+        self.idle_secs = win::idle_seconds();
+        let s = self.settings.idle.clone();
+        let active = self.idle_cpu || self.idle_gpu || self.idle_tried;
+        match settings::idle_action(&s, self.idle_secs, active) {
+            IdleAction::Start if !self.idle_tried => {
+                self.idle_tried = true;
+                self.log(&format!("idle for {} s: idle mode starting the selected miners", self.idle_secs));
+                if s.cpu && !self.miner.is_running() {
+                    self.start_mining();
+                    self.idle_cpu = self.miner.is_running();
+                }
+                if s.gpu && !self.gpu_miner.is_running() {
+                    self.start_gpu();
+                    self.idle_gpu = self.gpu_miner.is_running();
+                }
+            }
+            IdleAction::Stop => {
+                if self.idle_cpu || self.idle_gpu {
+                    self.log("input detected: idle mode stopping the miners it started");
+                }
+                if self.idle_cpu {
+                    self.stop_mining();
+                }
+                if self.idle_gpu {
+                    self.stop_gpu();
+                }
+                self.idle_tried = false;
+            }
+            _ => {}
+        }
+        // Stay awake only while something idle mode started is still running.
+        let want_awake = s.enabled
+            && s.keep_awake
+            && ((self.idle_cpu && self.miner.is_running())
+                || (self.idle_gpu && self.gpu_miner.is_running()));
+        if want_awake != self.idle_awake {
+            win::keep_awake(want_awake);
+            self.idle_awake = want_awake;
+        }
+    }
+
+    /// Adds an app event to the Logs tab.
+    pub fn log(&self, text: &str) {
+        if let Ok(mut b) = self.logbook.lock() {
+            b.push(Source::App, text);
+        }
+    }
+
+    /// New journal lines go to the log; SSH errors are logged once per change.
+    fn record_probe(&mut self, res: &Result<OxyhomeStats, String>) {
+        match res {
+            Ok(s) => {
+                if let Ok(mut b) = self.logbook.lock() {
+                    b.push_server(&s.journal);
+                }
+                if self.last_server_error.take().is_some() {
+                    self.log("oxyhome: SSH connection works again");
+                }
+            }
+            Err(e) => {
+                if self.last_server_error.as_deref() != Some(e.as_str()) {
+                    self.log(&format!("oxyhome: {e}"));
+                    self.last_server_error = Some(e.clone());
+                }
+            }
+        }
+    }
+
+    pub fn set_idle_minutes(&mut self, minutes: u32) {
+        self.settings.idle.minutes = minutes.clamp(1, 24 * 60);
+        self.save_settings();
+    }
+
+    /// True while idle mode has miners running.
+    pub fn idle_mining(&self) -> bool {
+        (self.idle_cpu && self.miner.is_running()) || (self.idle_gpu && self.gpu_miner.is_running())
     }
 
     pub fn cpu_hashrate(&self) -> f64 {
@@ -200,6 +329,7 @@ impl Dashboard {
             Ok(()) => self.message = None,
             Err(e) => {
                 self.miner.stop();
+                self.log(&format!("CPU mining failed to start: {e}"));
                 self.message = Some(e);
             }
         }
@@ -208,6 +338,7 @@ impl Dashboard {
     pub fn stop_mining(&mut self) {
         self.miner.stop();
         self.local.clear();
+        self.idle_cpu = false;
     }
 
     pub fn toggle_mining(&mut self) {
@@ -223,6 +354,7 @@ impl Dashboard {
             Ok(()) => self.message = None,
             Err(e) => {
                 self.gpu_miner.stop();
+                self.log(&format!("GPU mining failed to start: {e}"));
                 self.message = Some(e);
             }
         }
@@ -231,6 +363,7 @@ impl Dashboard {
     pub fn stop_gpu(&mut self) {
         self.gpu_miner.stop();
         self.gpu = None;
+        self.idle_gpu = false;
     }
 
     pub fn toggle_gpu(&mut self) {
@@ -371,14 +504,19 @@ impl Dashboard {
         self.oxyhome_busy = true;
         let target = self.settings.oxyhome.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let what = format!("{:?}", action).to_lowercase();
             let result = cx
                 .background_executor()
                 .spawn(async move { remote::control(&target, action) })
                 .await;
             let _ = this.update(cx, |d, cx| {
                 d.oxyhome_busy = false;
-                if let Err(e) = result {
-                    d.message = Some(format!("oxyhome: {e}"));
+                match result {
+                    Ok(()) => d.log(&format!("oxyhome: systemctl {what} cpuminer done")),
+                    Err(e) => {
+                        d.log(&format!("oxyhome: systemctl {what} cpuminer failed: {e}"));
+                        d.message = Some(format!("oxyhome: {e}"));
+                    }
                 }
                 d.oxyhome_due = Instant::now();
                 cx.notify();
@@ -411,12 +549,16 @@ impl Dashboard {
                     .await;
                 let ok = this.update(cx, |d, cx| {
                     if exited > 0 {
-                        d.message = Some(format!(
+                        let m = format!(
                             "{exited} miner instance(s) exited on their own; check the miner path and pool."
-                        ));
+                        );
+                        d.log(&m);
+                        d.message = Some(m);
                     }
                     if let Some(err) = gpu_exit.into_iter().next() {
-                        d.message = Some(format!("GPU miner exited: {err}"));
+                        let m = format!("GPU miner exited: {err}");
+                        d.log(&m);
+                        d.message = Some(m);
                     }
                     d.local = views;
                     d.gpu = gpu_views.into_iter().next();
@@ -483,6 +625,7 @@ impl Dashboard {
                             .spawn(async move { remote::probe(&target) })
                             .await;
                         let _ = weak.update(&mut acx, |d, cx| {
+                            d.record_probe(&res);
                             d.oxyhome = Some(res);
                             d.oxyhome_busy = false;
                             cx.notify();

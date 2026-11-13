@@ -12,7 +12,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Remote read-only probe. One ssh round trip; the 10 s energy gap is inside.
 /// Only fixed commands; no user text is interpolated.
-const PROBE: &str = "systemctl is-active cpuminer; echo ---SHOW; systemctl show cpuminer -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u cpuminer -o cat -n 300; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
+const PROBE: &str = "systemctl is-active cpuminer; echo ---SHOW; systemctl show cpuminer -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u cpuminer -o short-unix -n 300; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OxyhomeStats {
@@ -23,6 +23,8 @@ pub struct OxyhomeStats {
     pub restarts: Option<u32>,
     pub log: LogState,
     pub temp_c: Option<f64>,
+    /// Journal lines as (unix time, message), oldest first.
+    pub journal: Vec<(f64, String)>,
     pub watts: Option<f64>,
 }
 
@@ -130,6 +132,15 @@ pub fn probe(target: &SshTarget) -> Result<OxyhomeStats, String> {
 }
 
 /// Splits the probe output on its ---MARKER lines and parses each part.
+/// "1794600000.123456 host cpuminer[812]: message" -> (time, message).
+/// Lines without a leading timestamp (e.g. "-- No entries --") give None.
+fn split_journal_line(line: &str) -> Option<(f64, &str)> {
+    let (ts, rest) = line.split_once(' ')?;
+    let ts: f64 = ts.parse().ok()?;
+    let (_, msg) = rest.split_once(": ")?;
+    Some((ts, msg))
+}
+
 pub fn parse_probe(text: &str) -> OxyhomeStats {
     let mut stats = OxyhomeStats {
         unit_found: true,
@@ -163,8 +174,17 @@ pub fn parse_probe(text: &str) -> OxyhomeStats {
             stats.unit_found = v.trim() != "not-found";
         }
     }
-    let log_text = parts.get("LOG").map(|v| v.join("\n")).unwrap_or_default();
-    stats.log = parse::parse_journal(&log_text);
+    let mut messages = Vec::new();
+    for line in parts.get("LOG").into_iter().flatten() {
+        match split_journal_line(line) {
+            Some((ts, msg)) => {
+                messages.push(msg.to_string());
+                stats.journal.push((ts, msg.to_string()));
+            }
+            None => messages.push(line.to_string()),
+        }
+    }
+    stats.log = parse::parse_journal(&messages.join("\n"));
     let temp_text = parts.get("TEMP").map(|v| v.join("\n")).unwrap_or_default();
     stats.temp_c = parse::parse_package_temp(&temp_text);
     if let Some(energy) = parts.get("ENERGY").and_then(|v| v.first()) {
@@ -211,6 +231,24 @@ Package id 0:  +61.0°C  (high = +86.0°C, crit = +100.0°C)
         assert_eq!(s.log.accepted, 9);
         assert_eq!(s.temp_c, Some(61.0));
         assert_eq!(s.watts, Some(82.0));
+    }
+
+    #[test]
+    fn short_unix_journal_lines() {
+        // Real lines from oxyhome (journalctl -o short-unix).
+        let out = "active\n---SHOW\nLoadState=loaded\n---LOG\n\
+1794613114.204477 oxyhome cpuminer[1631584]: [2026-11-13 23:38:34] New Work: Block 975724, Tx 12, Netdiff 1.4836e+14, Job 6af4689e00001c8e\n\
+1794613114.204817 oxyhome cpuminer[1631584]:                       TTF @ 69.39 Mh/s: Block 291183682y360d, Share 7d03h\n\
+1794613144.235578 oxyhome cpuminer[1631584]:                       Hash rate          0.00h/s     40.10Mh/s   (69.40Mh/s)\n\
+---TEMP\n---ENERGY\n";
+        let s = parse_probe(out);
+        assert_eq!(s.journal.len(), 3);
+        assert_eq!(s.journal[0].0, 1794613114.204477);
+        assert!(s.journal[0].1.starts_with("[2026-11-13 23:38:34] New Work"));
+        // The message keeps its leading spaces, so summary lines still parse.
+        assert_eq!(s.log.block, Some(975724));
+        assert_eq!(s.log.hashrate, Some(69.4e6));
+        assert_eq!(split_journal_line("-- No entries --"), None);
     }
 
     #[test]

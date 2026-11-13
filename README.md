@@ -53,6 +53,23 @@ Live miner test (starts the real miner for about a minute):
 cargo test -- --ignored live_ --nocapture
 ```
 
+## Idle mining
+
+Like Salad: turn on "Mine when this PC is idle", pick the delay on the slider
+(1 min to 2 h) and whether to use the CPU, the GPU or both. After that long
+without keyboard or mouse input the app starts those miners, and stops them
+on the next input. Miners you started yourself are never stopped by it.
+While idle mining runs the PC is kept from sleeping (toggle). Gamepad input
+does not count as activity (Windows GetLastInputInfo).
+
+## Logs tab
+
+Everything in one place, newest first: each CPU instance, the GPU miner,
+app events (starts, stops, idle mode, server commands, SSH errors) and the
+home server journal (read with `journalctl -o short-unix`, no duplicates).
+Filter by source, Copy to the clipboard, Clear. Kept in memory only (last
+5000 lines).
+
 ## GPU miner (gpu-miner)
 
 `gpu-miner/` is a small SHA256d GPU miner written for this app (wgpu compute

@@ -4,6 +4,7 @@
 
 mod app;
 mod input;
+mod logbook;
 mod miner;
 mod network;
 mod odds;

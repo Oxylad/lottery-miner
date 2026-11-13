@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::parse::{self, ApiSummary, LogState};
+use crate::logbook::{SharedLog, Source};
 use crate::settings::Settings;
 
 const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
@@ -36,6 +37,8 @@ pub struct InstanceHandle {
 #[derive(Default)]
 pub struct Miner {
     instances: Vec<Instance>,
+    /// Where every output line also goes (the Logs tab).
+    book: Option<SharedLog>,
 }
 
 pub fn command_line(settings: &Settings, index: u32, port: u16) -> Vec<String> {
@@ -93,6 +96,13 @@ pub fn gpu_command_line(settings: &Settings) -> Vec<String> {
 }
 
 impl Miner {
+    pub fn with_log(book: SharedLog) -> Self {
+        Self {
+            instances: Vec::new(),
+            book: Some(book),
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         !self.instances.is_empty()
     }
@@ -127,7 +137,7 @@ impl Miner {
         for i in 0..settings.instances {
             let port = settings.api_base_port + i as u16;
             let args = command_line(settings, i, port);
-            self.spawn_instance(&settings.miner_exe, &args, i, port)?;
+            self.spawn_instance(&settings.miner_exe, &args, i, port, Source::Cpu(i))?;
         }
         Ok(())
     }
@@ -142,10 +152,22 @@ impl Miner {
             return Err(format!("GPU miner not found at {}", exe.display()));
         }
         let args = gpu_command_line(settings);
-        self.spawn_instance(&exe.display().to_string(), &args, 0, settings.gpu.api_port)
+        self.spawn_instance(&exe.display().to_string(), &args, 0, settings.gpu.api_port, Source::Gpu)
     }
 
-    fn spawn_instance(&mut self, exe: &str, args: &[String], index: u32, port: u16) -> Result<(), String> {
+    fn spawn_instance(
+        &mut self,
+        exe: &str,
+        args: &[String],
+        index: u32,
+        port: u16,
+        source: Source,
+    ) -> Result<(), String> {
+        if let Some(b) = &self.book {
+            if let Ok(mut b) = b.lock() {
+                b.push(Source::App, &format!("starting {}: {} {}", source.label(), exe, args.join(" ")));
+            }
+        }
         let mut child = Command::new(exe)
             .args(args)
             .stdin(Stdio::null())
@@ -156,10 +178,10 @@ impl Miner {
             .map_err(|e| format!("cannot start {exe}: {e}"))?;
         let log = Arc::new(Mutex::new(LogState::default()));
         if let Some(out) = child.stdout.take() {
-            spawn_reader(out, log.clone());
+            spawn_reader(out, log.clone(), self.book.clone(), source);
         }
         if let Some(err) = child.stderr.take() {
-            spawn_reader(err, log.clone());
+            spawn_reader(err, log.clone(), self.book.clone(), source);
         }
         self.instances.push(Instance {
             index,
@@ -173,6 +195,12 @@ impl Miner {
 
     /// Kills only the children this app started, then waits for them.
     pub fn stop(&mut self) {
+        if !self.instances.is_empty() {
+            if let Some(Ok(mut b)) = self.book.as_ref().map(|b| b.lock()) {
+                let names: Vec<String> = self.instances.iter().map(|i| format!("pid {}", i.child.id())).collect();
+                b.push(Source::App, &format!("stopping {}", names.join(", ")));
+            }
+        }
         for inst in self.instances.iter_mut() {
             let _ = inst.child.kill();
             let _ = inst.child.wait();
@@ -220,12 +248,22 @@ impl Drop for Miner {
     }
 }
 
-fn spawn_reader<R: Read + Send + 'static>(stream: R, log: Arc<Mutex<LogState>>) {
+fn spawn_reader<R: Read + Send + 'static>(
+    stream: R,
+    log: Arc<Mutex<LogState>>,
+    book: Option<SharedLog>,
+    source: Source,
+) {
     thread::spawn(move || {
         let reader = BufReader::new(stream);
         for line in reader.lines().map_while(Result::ok) {
             if let Ok(mut st) = log.lock() {
                 st.feed(&line);
+            }
+            if let Some(b) = &book {
+                if let Ok(mut b) = b.lock() {
+                    b.push(source, &line);
+                }
             }
         }
     });

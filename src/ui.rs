@@ -3,16 +3,17 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, MouseButton, MouseDownEvent, SharedString, Window,
+    AnyElement, Context, Entity, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window,
     div, prelude::*, px, relative, rgb,
 };
 
-use crate::app::Dashboard;
+use crate::app::{Dashboard, View};
+use crate::logbook::{self, Filter, Source};
 use crate::input::TextInput;
 use crate::network::{self, Network};
 use crate::odds;
 use crate::remote::ServiceAction;
-use crate::settings::MAX_MHS_PER_INSTANCE;
+use crate::settings::{IDLE_STEPS, MAX_MHS_PER_INSTANCE};
 
 const BG: u32 = 0x1b1d22;
 const CARD: u32 = 0x252830;
@@ -606,6 +607,64 @@ impl Render for Dashboard {
         );
         set = set.child(note(self.settings_path.display().to_string(), MUTED));
 
+        // ---- idle mining
+        let is = &self.settings.idle;
+        let mut idle = card("Idle mining").child(toggle(
+            "Mine when this PC is idle",
+            is.enabled,
+            cx,
+            |d, _| {
+                d.settings.idle.enabled = !d.settings.idle.enabled;
+                d.save_settings();
+            },
+        ));
+        idle = idle
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(div().text_color(rgb(MUTED)).child("Start after no input for"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(if is.enabled { ACCENT } else { MUTED }))
+                            .child(fmt_minutes(is.minutes)),
+                    ),
+            )
+            .child(idle_slider(is.minutes, cx))
+            .child(toggle("Use the CPU", is.cpu, cx, |d, _| {
+                d.settings.idle.cpu = !d.settings.idle.cpu;
+                d.save_settings();
+            }))
+            .child(toggle("Use the GPU", is.gpu, cx, |d, _| {
+                d.settings.idle.gpu = !d.settings.idle.gpu;
+                d.save_settings();
+            }))
+            .child(toggle("Keep the PC awake while idle mining", is.keep_awake, cx, |d, _| {
+                d.settings.idle.keep_awake = !d.settings.idle.keep_awake;
+                d.save_settings();
+            }));
+        let idle_for = fmt_duration(Duration::from_secs(self.idle_secs));
+        let (idle_status, idle_color) = if !is.enabled {
+            ("Off.".to_string(), MUTED)
+        } else if self.idle_mining() {
+            (
+                format!("Mining: no input for {idle_for}. Stops as soon as you move the mouse or type."),
+                GOOD,
+            )
+        } else if !is.cpu && !is.gpu {
+            ("Pick the CPU, the GPU or both.".to_string(), WARN)
+        } else {
+            (
+                format!("No input for {idle_for}; starts at {}.", fmt_minutes(is.minutes)),
+                MUTED,
+            )
+        };
+        idle = idle.child(note(idle_status, idle_color)).child(note(
+            "Only miners started by idle mode are stopped on input; ones you start yourself keep running. Gamepad input does not count as activity.",
+            MUTED,
+        ));
+
         // ---- GPU (gpu-miner.exe)
         let gpu_running = self.gpu_miner.is_running();
         let gs = &self.settings.gpu;
@@ -708,15 +767,231 @@ impl Render for Dashboard {
                     .child(button("Dismiss", true, cx, |d, _| d.message = None)),
             );
         }
+        root = root.child(tab_bar(self.view, cx));
+        if self.view == View::Logs {
+            return root.child(self.logs_view(cx));
+        }
         root.child(
             div()
                 .flex()
                 .gap_3()
                 .w_full()
-                .child(column().child(local).child(gpu).child(oxy))
+                .child(column().child(local).child(gpu).child(idle).child(oxy))
                 .child(column().child(odds_card).child(pool).child(set)),
         )
     }
+}
+
+fn tab_bar(view: View, cx: &Context<Dashboard>) -> AnyElement {
+    let tab = |label: &'static str, this: View| {
+        let active = view == this;
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(rgb(if active { TEXT } else { MUTED }))
+            .bg(rgb(if active { CARD } else { BG }))
+            .border_1()
+            .border_color(rgb(if active { BORDER } else { BG }))
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |d, _: &MouseDownEvent, _, cx| {
+                    d.view = this;
+                    cx.notify();
+                }),
+            )
+    };
+    div()
+        .flex()
+        .gap_1()
+        .child(tab("Dashboard", View::Dashboard))
+        .child(tab("Logs", View::Logs))
+        .into_any_element()
+}
+
+/// Lines shown in the Logs tab (newest first).
+const LOG_VIEW_LINES: usize = 500;
+
+fn source_color(s: Source) -> u32 {
+    match s {
+        Source::Cpu(_) => 0x7aa2f7,
+        Source::Gpu => 0xbb9af7,
+        Source::App => ACCENT,
+        Source::Server => GOOD,
+    }
+}
+
+impl Dashboard {
+    fn logs_view(&self, cx: &Context<Self>) -> AnyElement {
+        let filter = self.log_filter;
+        let (lines, total) = match self.logbook.lock() {
+            Ok(b) => (b.recent(filter, LOG_VIEW_LINES), b.len()),
+            Err(_) => (Vec::new(), 0),
+        };
+        let chip = |label: &'static str, f: Option<Filter>| {
+            let active = filter == f;
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .text_sm()
+                .cursor_pointer()
+                .text_color(rgb(if active { BG } else { TEXT }))
+                .bg(rgb(if active { ACCENT } else { BUTTON_OFF }))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |d, _: &MouseDownEvent, _, cx| {
+                        d.log_filter = f;
+                        cx.notify();
+                    }),
+                )
+        };
+        let export = logbook::to_text(&lines);
+        let controls = div()
+            .flex()
+            .justify_between()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(chip("All", None))
+                    .child(chip("CPU", Some(Filter::Cpu)))
+                    .child(chip("GPU", Some(Filter::Gpu)))
+                    .child(chip("oxyhome", Some(Filter::Server)))
+                    .child(chip("App", Some(Filter::App))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                        "showing {} of {} (newest first)",
+                        lines.len(),
+                        total
+                    )))
+                    .child(button("Copy", !lines.is_empty(), cx, move |_, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(export.clone()));
+                    }))
+                    .child(button("Clear", total > 0, cx, |d, _| {
+                        if let Ok(mut b) = d.logbook.lock() {
+                            b.clear();
+                        }
+                    })),
+            );
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .p_2()
+            .rounded_md()
+            .bg(rgb(CARD))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .font_family("Consolas")
+            .text_xs();
+        if lines.is_empty() {
+            list = list.child(div().text_color(rgb(MUTED)).child(
+                "Nothing yet. Miner output, idle mode, server commands and the oxyhome journal appear here.",
+            ));
+        }
+        for l in &lines {
+            list = list.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(64.))
+                            .text_color(rgb(source_color(l.source)))
+                            .child(l.source.label()),
+                    )
+                    .child(div().min_w(px(0.)).text_color(rgb(TEXT)).child(l.text.clone())),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(controls)
+            .child(list)
+            .into_any_element()
+    }
+}
+
+fn fmt_minutes(m: u32) -> String {
+    match (m / 60, m % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
+/// Stepped slider over IDLE_STEPS: click or drag along the track.
+fn idle_slider(selected: u32, cx: &Context<Dashboard>) -> AnyElement {
+    let sel = IDLE_STEPS
+        .iter()
+        .position(|m| *m >= selected)
+        .unwrap_or(IDLE_STEPS.len() - 1);
+    let bar = |on: bool| div().flex_1().h(px(4.)).bg(rgb(if on { ACCENT } else { BORDER }));
+    let mut track = div().flex().w_full().h(px(24.)).items_center();
+    for (i, minutes) in IDLE_STEPS.iter().copied().enumerate() {
+        let mut cell = div()
+            .flex_1()
+            .h_full()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |d, _: &MouseDownEvent, _, cx| {
+                    d.set_idle_minutes(minutes);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(move |d, ev: &MouseMoveEvent, _, cx| {
+                if ev.pressed_button == Some(MouseButton::Left) && d.settings.idle.minutes != minutes {
+                    d.set_idle_minutes(minutes);
+                    cx.notify();
+                }
+            }));
+        if i == sel {
+            cell = cell
+                .child(bar(true))
+                .child(
+                    div()
+                        .size(px(16.))
+                        .rounded_full()
+                        .bg(rgb(TEXT))
+                        .border_2()
+                        .border_color(rgb(ACCENT)),
+                )
+                .child(bar(false));
+        } else {
+            cell = cell.child(bar(i < sel));
+        }
+        track = track.child(cell);
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(track)
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(fmt_minutes(IDLE_STEPS[0]))
+                .child(fmt_minutes(IDLE_STEPS[IDLE_STEPS.len() - 1])),
+        )
+        .into_any_element()
 }
 
 /// Half-width column that may shrink below its content's natural width.

@@ -61,6 +61,58 @@ impl Default for GpuSettings {
     }
 }
 
+/// Choices for the idle slider, in minutes.
+pub const IDLE_STEPS: [u32; 12] = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120];
+
+/// Start mining after the PC has had no keyboard/mouse input for a while,
+/// stop again on the next input (only what idle mode itself started).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdleSettings {
+    pub enabled: bool,
+    pub minutes: u32,
+    pub cpu: bool,
+    pub gpu: bool,
+    /// Prevent sleep while idle mining is running.
+    pub keep_awake: bool,
+}
+
+impl Default for IdleSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            minutes: 10,
+            cpu: true,
+            gpu: true,
+            keep_awake: true,
+        }
+    }
+}
+
+/// What idle mode should do now, given the idle time. Pure, for tests.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IdleAction {
+    /// Idle long enough: start the selected miners (if not running).
+    Start,
+    /// Input seen: stop what idle mode started.
+    Stop,
+    Nothing,
+}
+
+pub fn idle_action(s: &IdleSettings, idle_secs: u64, idle_running: bool) -> IdleAction {
+    let threshold = s.minutes.max(1) as u64 * 60;
+    if !s.enabled {
+        return if idle_running { IdleAction::Stop } else { IdleAction::Nothing };
+    }
+    if idle_secs >= threshold {
+        IdleAction::Start
+    } else if idle_running {
+        IdleAction::Stop
+    } else {
+        IdleAction::Nothing
+    }
+}
+
 /// Parses the port field of the form: empty means default.
 pub fn parse_port(text: &str) -> Result<Option<u16>, String> {
     let t = text.trim();
@@ -90,6 +142,7 @@ pub struct Settings {
     pub oxyhome: SshTarget,
     pub refresh_secs: u64,
     pub gpu: GpuSettings,
+    pub idle: IdleSettings,
 }
 
 impl Default for Settings {
@@ -109,6 +162,7 @@ impl Default for Settings {
             oxyhome: SshTarget::default(),
             refresh_secs: 5,
             gpu: GpuSettings::default(),
+            idle: IdleSettings::default(),
         }
     }
 }
@@ -235,6 +289,30 @@ mod tests {
         assert_eq!(s.affinity_mask(1), 0x00F0);
         assert_eq!(s.affinity_mask(2), 0x0F00);
         assert_eq!(s.affinity_mask(3), 0xF000);
+    }
+
+    #[test]
+    fn idle_decisions() {
+        let mut s = IdleSettings {
+            enabled: true,
+            minutes: 10,
+            ..Default::default()
+        };
+        assert_eq!(idle_action(&s, 0, false), IdleAction::Nothing);
+        assert_eq!(idle_action(&s, 599, false), IdleAction::Nothing);
+        assert_eq!(idle_action(&s, 600, false), IdleAction::Start);
+        assert_eq!(idle_action(&s, 3600, true), IdleAction::Start);
+        // Mouse moved: idle time drops below the threshold.
+        assert_eq!(idle_action(&s, 0, true), IdleAction::Stop);
+        // Turning the feature off stops what it started.
+        s.enabled = false;
+        assert_eq!(idle_action(&s, 3600, true), IdleAction::Stop);
+        assert_eq!(idle_action(&s, 3600, false), IdleAction::Nothing);
+        // 0 minutes is treated as 1.
+        s.enabled = true;
+        s.minutes = 0;
+        assert_eq!(idle_action(&s, 59, false), IdleAction::Nothing);
+        assert_eq!(idle_action(&s, 60, false), IdleAction::Start);
     }
 
     #[test]
