@@ -1,0 +1,9 @@
+[package]
+name = "gpu-miner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pollster = "=1.0.1"
+serde_json = "=1.0.154"
+wgpu = "=30.0.2"

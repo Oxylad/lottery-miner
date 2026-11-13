@@ -238,7 +238,8 @@ impl Render for Dashboard {
             },
             if running { GOOD } else { MUTED },
         ));
-        local = local.child(row("Total hashrate", fmt_hr(Some(total).filter(|t| *t > 0.0))));
+        let cpu_total = self.cpu_hashrate();
+        local = local.child(row("CPU hashrate", fmt_hr(Some(cpu_total).filter(|t| *t > 0.0))));
         let mut stalls = 0;
         for v in &self.local {
             let speed = fmt_hr(v.hashrate);
@@ -399,7 +400,7 @@ impl Render for Dashboard {
         let oxy_hr = self.oxyhome_hashrate();
         let combined = Some(total + oxy_hr.unwrap_or(0.0));
         let mut odds_card = card("Odds of finding a block");
-        for r in odds_rows("This PC", Some(total), &net) {
+        for r in odds_rows("This PC (CPU + GPU)", Some(total), &net) {
             odds_card = odds_card.child(r);
         }
         let server_name = if self.settings.oxyhome.name.is_empty() {
@@ -605,9 +606,72 @@ impl Render for Dashboard {
         );
         set = set.child(note(self.settings_path.display().to_string(), MUTED));
 
-        let gpu = card("GPU mining")
-            .child(note("GPU mining: not supported yet.", MUTED))
-            .child(button("Enable GPU mining", false, cx, |_, _| {}));
+        // ---- GPU (gpu-miner.exe)
+        let gpu_running = self.gpu_miner.is_running();
+        let gs = &self.settings.gpu;
+        let mut gpu = card("This PC (GPU)").child(
+            div()
+                .flex()
+                .gap_2()
+                .child(button("Start GPU mining", !gpu_running, cx, |d, _| d.start_gpu()))
+                .child(button("Stop GPU mining", gpu_running, cx, |d, _| d.stop_gpu())),
+        );
+        match (&self.gpu, gpu_running) {
+            (_, false) => gpu = gpu.child(row_colored("Status", "stopped", MUTED)),
+            (None, true) => gpu = gpu.child(row_colored("Status", "starting (GPU self-test)", WARN)),
+            (Some(v), true) => {
+                let (status, color) = if v.connected {
+                    ("mining".to_string(), GOOD)
+                } else if let Some(e) = &v.last_error {
+                    (e.clone(), WARN)
+                } else {
+                    ("connecting to pool".to_string(), WARN)
+                };
+                gpu = gpu.child(row_colored("Status", status, color));
+                if let Some(dev) = &v.device {
+                    gpu = gpu.child(row("Device", dev.clone()));
+                }
+                gpu = gpu
+                    .child(row("GPU hashrate", fmt_hr(v.hashrate)))
+                    .child(row(
+                        "Shares",
+                        format!("acc {} / rej {}   up {}", v.accepted, v.rejected, fmt_duration(v.uptime)),
+                    ));
+            }
+        }
+        gpu = gpu.child(stepper(
+            "Intensity".into(),
+            gs.intensity.to_string(),
+            cx,
+            |d, _| {
+                d.settings.gpu.intensity = d.settings.gpu.intensity.saturating_sub(1).max(16);
+                d.save_settings();
+            },
+            |d, _| {
+                d.settings.gpu.intensity = (d.settings.gpu.intensity + 1).min(30);
+                d.save_settings();
+            },
+        ));
+        gpu = gpu.child(note(
+            format!(
+                "2^{} nonces per GPU batch. 25 gives about 1.9 GH/s with ~17 ms batches on an RX 7700 XT; lower it if games or video stutter. Applies on the next Start.",
+                gs.intensity
+            ),
+            MUTED,
+        ));
+        gpu = gpu
+            .child(field("GPU worker name", f.gpu_worker.clone(), "Pool user is <address>.<worker>; keep it different from the CPU worker."))
+            .child(field("GPU device", f.gpu_device.clone(), "Part of the GPU name; empty picks the first discrete GPU."))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(button("Save", true, cx, |d, cx| d.apply_gpu_form(cx))),
+            )
+            .child(toggle("Start GPU mining when the app starts", gs.start_on_launch, cx, |d, _| {
+                d.settings.gpu.start_on_launch = !d.settings.gpu.start_on_launch;
+                d.save_settings();
+            }));
 
         let mut root = div()
             .id("root")
@@ -649,7 +713,7 @@ impl Render for Dashboard {
                 .flex()
                 .gap_3()
                 .w_full()
-                .child(column().child(local).child(oxy).child(gpu))
+                .child(column().child(local).child(gpu).child(oxy))
                 .child(column().child(odds_card).child(pool).child(set)),
         )
     }

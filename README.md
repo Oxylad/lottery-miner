@@ -52,3 +52,30 @@ Live miner test (starts the real miner for about a minute):
 ```
 cargo test -- --ignored live_ --nocapture
 ```
+
+## GPU miner (gpu-miner)
+
+`gpu-miner/` is a small SHA256d GPU miner written for this app (wgpu compute
+shader, DirectX 12 or Vulkan, any GPU vendor). The app starts it like
+cpuminer: idle priority, no console, stopped by process handle, stats over
+the same `summary` API (default port 4060), pool worker `desktopgpu`.
+
+- It rolls extranonce2 itself, so it never hits the ckpool nonce-range stall.
+- Every start runs a self-test that must find the real nonce of block 125552
+  on the GPU before it mines.
+- RX 7700 XT: about 2.0 GH/s on DX12 at intensity 26, 1.9 GH/s at the default
+  25 (17 ms per GPU batch). Vulkan is about half as fast with this kernel.
+  Lower the intensity in the app if games or video stutter.
+
+```
+gpu-miner.exe --list-devices
+gpu-miner.exe --benchmark --seconds 10
+gpu-miner.exe -o stratum+tcp://eusolo.ckpool.org:3333 -u <address>.desktopgpu -p x -b 127.0.0.1:4060
+```
+
+`cargo build --release --workspace` puts `gpu-miner.exe` next to
+`lottery-miner.exe`, where the app looks for it by default.
+
+Note: Cargo.lock pins `gpu-allocator`'s `windows` dependency to 0.62 (what
+wgpu-hal 30 needs); gpui uses 0.61. If `cargo update` reverts it, the DX12
+backend fails to compile with type mismatches in wgpu-hal.

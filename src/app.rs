@@ -31,6 +31,10 @@ pub struct InstanceView {
     pub stalled_now: bool,
     pub api_error: Option<String>,
     pub netdiff: Option<f64>,
+    pub connected: bool,
+    /// GPU name reported by gpu-miner.
+    pub device: Option<String>,
+    pub last_error: Option<String>,
 }
 
 pub struct Dashboard {
@@ -38,6 +42,9 @@ pub struct Dashboard {
     pub settings_path: PathBuf,
     pub miner: Miner,
     pub local: Vec<InstanceView>,
+    /// The GPU miner process (gpu-miner.exe), separate from the CPU instances.
+    pub gpu_miner: Miner,
+    pub gpu: Option<InstanceView>,
     pub pool: Option<Result<Option<PoolUser>, String>>,
     pub network: Option<Result<Network, String>>,
     pub oxyhome: Option<Result<OxyhomeStats, String>>,
@@ -59,6 +66,8 @@ pub struct Form {
     pub ssh_host: Entity<TextInput>,
     pub ssh_port: Entity<TextInput>,
     pub ssh_key: Entity<TextInput>,
+    pub gpu_worker: Entity<TextInput>,
+    pub gpu_device: Entity<TextInput>,
 }
 
 impl Form {
@@ -79,6 +88,8 @@ impl Form {
                 "22",
             ),
             ssh_key: field(&s.oxyhome.key_file, "~/.ssh/id_ed25519"),
+            gpu_worker: field(&s.gpu.worker, "desktopgpu"),
+            gpu_device: field(&s.gpu.device, "first discrete GPU"),
         }
     }
 
@@ -93,6 +104,8 @@ impl Form {
             (&self.ssh_host, s.oxyhome.host.as_str()),
             (&self.ssh_port, port.as_str()),
             (&self.ssh_key, s.oxyhome.key_file.as_str()),
+            (&self.gpu_worker, s.gpu.worker.as_str()),
+            (&self.gpu_device, s.gpu.device.as_str()),
         ] {
             input.update(cx, |i, cx| i.set_text(text, cx));
         }
@@ -121,6 +134,8 @@ impl Dashboard {
             settings_path,
             miner: Miner::default(),
             local: Vec::new(),
+            gpu_miner: Miner::default(),
+            gpu: None,
             pool: None,
             network: None,
             oxyhome: None,
@@ -133,13 +148,25 @@ impl Dashboard {
         if this.settings.start_mining_on_launch {
             this.start_mining();
         }
+        if this.settings.gpu.start_on_launch {
+            this.start_gpu();
+        }
         Self::spawn_local_loop(cx);
         Self::spawn_slow_loop(cx);
         this
     }
 
-    pub fn total_hashrate(&self) -> f64 {
+    pub fn cpu_hashrate(&self) -> f64 {
         self.local.iter().filter_map(|i| i.hashrate).sum()
+    }
+
+    pub fn gpu_hashrate(&self) -> f64 {
+        self.gpu.as_ref().and_then(|g| g.hashrate).unwrap_or(0.0)
+    }
+
+    /// This PC: CPU instances plus the GPU miner.
+    pub fn total_hashrate(&self) -> f64 {
+        self.cpu_hashrate() + self.gpu_hashrate()
     }
 
     pub fn oxyhome_hashrate(&self) -> Option<f64> {
@@ -191,6 +218,35 @@ impl Dashboard {
         }
     }
 
+    pub fn start_gpu(&mut self) {
+        match self.gpu_miner.start_gpu(&self.settings) {
+            Ok(()) => self.message = None,
+            Err(e) => {
+                self.gpu_miner.stop();
+                self.message = Some(e);
+            }
+        }
+    }
+
+    pub fn stop_gpu(&mut self) {
+        self.gpu_miner.stop();
+        self.gpu = None;
+    }
+
+    pub fn toggle_gpu(&mut self) {
+        if self.gpu_miner.is_running() {
+            self.stop_gpu();
+        } else {
+            self.start_gpu();
+        }
+    }
+
+    /// Stops everything this app started on this PC (never the home server).
+    pub fn stop_local_miners(&mut self) {
+        self.stop_mining();
+        self.stop_gpu();
+    }
+
     pub fn save_settings(&mut self) {
         if let Err(e) = settings::save_to(&self.settings_path, &self.settings) {
             self.message = Some(e);
@@ -215,6 +271,23 @@ impl Dashboard {
         self.network_due = Instant::now();
         self.message = Some(if self.miner.is_running() {
             "Saved. Stop and start mining to use the new miner settings.".into()
+        } else {
+            "Saved.".into()
+        });
+    }
+
+    /// Reads the GPU text fields into settings and saves them.
+    pub fn apply_gpu_form(&mut self, cx: &mut Context<Self>) {
+        let worker = self.form.gpu_worker.read(cx).text().trim().to_string();
+        if worker.is_empty() || worker.contains(char::is_whitespace) || worker.contains('.') {
+            self.message = Some("GPU worker name must be one word without dots.".into());
+            return;
+        }
+        self.settings.gpu.worker = worker;
+        self.settings.gpu.device = self.form.gpu_device.read(cx).text().trim().to_string();
+        self.save_settings();
+        self.message = Some(if self.gpu_miner.is_running() {
+            "Saved. Stop and start GPU mining to use the new settings.".into()
         } else {
             "Saved.".into()
         });
@@ -319,15 +392,22 @@ impl Dashboard {
     fn spawn_local_loop(cx: &mut Context<Self>) {
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             loop {
-                let Ok((handles, secs, exited)) = this.update(cx, |d, _| {
+                let Ok((handles, gpu_handles, secs, exited, gpu_exit)) = this.update(cx, |d, _| {
                     let exited = d.miner.reap_exited();
-                    (d.miner.handles(), d.settings.refresh_secs, exited)
+                    let gpu_exit = d.gpu_miner.reap_exited_errors();
+                    (
+                        d.miner.handles(),
+                        d.gpu_miner.handles(),
+                        d.settings.refresh_secs,
+                        exited,
+                        gpu_exit,
+                    )
                 }) else {
                     break;
                 };
-                let views = cx
+                let (views, gpu_views) = cx
                     .background_executor()
-                    .spawn(async move { collect_local(handles) })
+                    .spawn(async move { (collect_local(handles), collect_local(gpu_handles)) })
                     .await;
                 let ok = this.update(cx, |d, cx| {
                     if exited > 0 {
@@ -335,7 +415,11 @@ impl Dashboard {
                             "{exited} miner instance(s) exited on their own; check the miner path and pool."
                         ));
                     }
+                    if let Some(err) = gpu_exit.into_iter().next() {
+                        d.message = Some(format!("GPU miner exited: {err}"));
+                    }
                     d.local = views;
+                    d.gpu = gpu_views.into_iter().next();
                     cx.notify();
                 });
                 if ok.is_err() {
@@ -431,6 +515,9 @@ fn collect_local(handles: Vec<InstanceHandle>) -> Vec<InstanceView> {
                 stalled_now: log.stalled_now,
                 api_error: None,
                 netdiff: log.netdiff,
+                connected: log.connected,
+                device: None,
+                last_error: log.last_error.clone(),
             };
             match miner::query_summary(h.port) {
                 Ok(s) => {
@@ -440,6 +527,7 @@ fn collect_local(handles: Vec<InstanceHandle>) -> Vec<InstanceView> {
                     }
                     v.accepted = v.accepted.max(s.accepted);
                     v.rejected = v.rejected.max(s.rejected);
+                    v.device = s.device;
                     // The API's DIFF is the network difficulty.
                     if v.netdiff.is_none() {
                         v.netdiff = s.difficulty.filter(|d| *d > 1e6);

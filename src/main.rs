@@ -53,6 +53,7 @@ struct Tray {
     icon: TrayIcon,
     open: MenuItem,
     mining: MenuItem,
+    gpu: MenuItem,
     oxy_start: MenuItem,
     oxy_stop: MenuItem,
     quit: MenuItem,
@@ -62,6 +63,7 @@ fn build_tray() -> Result<Tray, String> {
     let menu = Menu::new();
     let open = MenuItem::new("Open", true, None);
     let mining = MenuItem::new("Start CPU mining", true, None);
+    let gpu = MenuItem::new("Start GPU mining", true, None);
     let oxy_start = MenuItem::new("oxyhome: Start miner", true, None);
     let oxy_stop = MenuItem::new("oxyhome: Stop miner", true, None);
     let quit = MenuItem::new("Quit", true, None);
@@ -69,6 +71,7 @@ fn build_tray() -> Result<Tray, String> {
         &open,
         &PredefinedMenuItem::separator(),
         &mining,
+        &gpu,
         &PredefinedMenuItem::separator(),
         &oxy_start,
         &oxy_stop,
@@ -87,6 +90,7 @@ fn build_tray() -> Result<Tray, String> {
         icon,
         open,
         mining,
+        gpu,
         oxy_start,
         oxy_stop,
         quit,
@@ -111,6 +115,8 @@ fn spawn_tray_loop(tray: Tray, dashboard: Entity<Dashboard>, cx: &mut App) {
                             d.show_window();
                         } else if id == *tray.mining.id() {
                             d.toggle_mining();
+                        } else if id == *tray.gpu.id() {
+                            d.toggle_gpu();
                         } else if id == *tray.oxy_start.id() {
                             d.oxyhome_control(ServiceAction::Start, cx);
                         } else if id == *tray.oxy_stop.id() {
@@ -136,9 +142,10 @@ fn spawn_tray_loop(tray: Tray, dashboard: Entity<Dashboard>, cx: &mut App) {
                 let _ = cx.update(|cx| {
                     dashboard.update(cx, |d, _| {
                         if d.settings.stop_miners_on_quit {
-                            d.stop_mining();
+                            d.stop_local_miners();
                         } else {
                             d.miner.detach();
+                            d.gpu_miner.detach();
                         }
                     });
                     cx.quit();
@@ -149,15 +156,20 @@ fn spawn_tray_loop(tray: Tray, dashboard: Entity<Dashboard>, cx: &mut App) {
                 last_label = Instant::now();
                 let state = cx.update(|cx| {
                     let d = dashboard.read(cx);
-                    (d.miner.is_running(), d.total_hashrate(), d.oxyhome_hashrate())
+                    (d.miner.is_running(), d.gpu_miner.is_running(), d.total_hashrate(), d.oxyhome_hashrate())
                 });
-                if let Ok((running, total, oxy)) = state {
+                if let Ok((running, gpu_running, total, oxy)) = state {
                     tray.mining.set_text(if running {
                         "Stop CPU mining"
                     } else {
                         "Start CPU mining"
                     });
-                    let mut tip = if running {
+                    tray.gpu.set_text(if gpu_running {
+                        "Stop GPU mining"
+                    } else {
+                        "Start GPU mining"
+                    });
+                    let mut tip = if running || gpu_running {
                         format!("Lottery Miner: {}", odds::format_hashrate(total))
                     } else {
                         "Lottery Miner: stopped".to_string()

@@ -33,6 +33,34 @@ impl Default for SshTarget {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpuSettings {
+    /// Path to gpu-miner.exe; empty = next to this app.
+    pub exe: String,
+    /// Pool worker name for the GPU (user = <address>.<worker>).
+    pub worker: String,
+    pub api_port: u16,
+    /// 2^intensity nonces per GPU dispatch (16-30). Lower = smoother desktop.
+    pub intensity: u32,
+    /// GPU name filter; empty = first discrete GPU.
+    pub device: String,
+    pub start_on_launch: bool,
+}
+
+impl Default for GpuSettings {
+    fn default() -> Self {
+        Self {
+            exe: String::new(),
+            worker: "desktopgpu".to_string(),
+            api_port: 4060,
+            intensity: 25,
+            device: String::new(),
+            start_on_launch: false,
+        }
+    }
+}
+
 /// Parses the port field of the form: empty means default.
 pub fn parse_port(text: &str) -> Result<Option<u16>, String> {
     let t = text.trim();
@@ -61,6 +89,7 @@ pub struct Settings {
     pub stop_miners_on_quit: bool,
     pub oxyhome: SshTarget,
     pub refresh_secs: u64,
+    pub gpu: GpuSettings,
 }
 
 impl Default for Settings {
@@ -79,6 +108,7 @@ impl Default for Settings {
             stop_miners_on_quit: true,
             oxyhome: SshTarget::default(),
             refresh_secs: 5,
+            gpu: GpuSettings::default(),
         }
     }
 }
@@ -108,6 +138,12 @@ impl Settings {
         }
         if self.refresh_secs < 2 {
             out.push("refresh interval must be at least 2 seconds".to_string());
+        }
+        if !(16..=30).contains(&self.gpu.intensity) {
+            out.push("GPU intensity must be 16 to 30".to_string());
+        }
+        if self.gpu.worker.trim().is_empty() {
+            out.push("GPU worker name is empty".to_string());
         }
         out
     }
@@ -172,6 +208,8 @@ mod tests {
         let s = load_from(&path).unwrap();
         assert_eq!(s.instances, 3);
         assert_eq!(s.threads_per_instance, 4);
+        // Files written before GPU support get the GPU defaults.
+        assert_eq!(s.gpu, GpuSettings::default());
     }
 
     #[test]

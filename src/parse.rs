@@ -50,6 +50,8 @@ pub struct LogState {
     pub last_job: Option<String>,
     /// True once a stall line was seen and no new work has arrived since.
     pub stalled_now: bool,
+    /// Last fatal/startup error line (gpu-miner), shown when the process exits.
+    pub last_error: Option<String>,
 }
 
 impl LogState {
@@ -60,7 +62,17 @@ impl LogState {
     /// Feeds one stdout/stderr line into the state.
     pub fn feed(&mut self, raw: &str) {
         let line = strip_timestamp(raw);
-        if line.starts_with("Stratum connection established") {
+        if line.starts_with("fatal:")
+            || line.starts_with("GPU init failed")
+            || line.starts_with("selftest FAILED")
+            || line.starts_with("Stratum connection interrupted")
+        {
+            self.last_error = Some(line.to_string());
+            if line.starts_with("Stratum connection interrupted") {
+                self.connected = false;
+            }
+        } else if line.starts_with("Stratum connection established") {
+            self.last_error = None;
             self.connected = true;
         } else if line.starts_with("Nonce range exhausted, extranonce not subscribed") {
             self.stall_count += 1;
@@ -130,6 +142,8 @@ pub struct ApiSummary {
     pub difficulty: Option<f64>,
     pub uptime_secs: Option<u64>,
     pub temp: Option<f64>,
+    /// Device name (gpu-miner sends GPU=...).
+    pub device: Option<String>,
 }
 
 pub fn parse_api_summary(reply: &str) -> Option<ApiSummary> {
@@ -154,6 +168,7 @@ pub fn parse_api_summary(reply: &str) -> Option<ApiSummary> {
         difficulty: map.get("DIFF").and_then(|v| v.parse().ok()),
         uptime_secs: map.get("UPTIME").and_then(|v| v.parse().ok()),
         temp: map.get("TEMP").and_then(|v| v.parse().ok()),
+        device: map.get("GPU").map(|v| v.to_string()),
     })
 }
 
@@ -254,6 +269,37 @@ mod tests {
         assert_eq!(s.difficulty, Some(148364561003867.41));
         assert_eq!(s.uptime_secs, Some(41));
         assert!(parse_api_summary("").is_none());
+    }
+
+    #[test]
+    fn gpu_miner_output() {
+        // Captured from gpu-miner 0.1.0 on this PC.
+        let reply = "NAME=gpu-miner;VER=0.1.0;API=1.0;ALGO=sha256d;GPU=AMD Radeon RX 7700 XT;URL=eusolo.ckpool.org:3333;HS=2017746058.72;KHS=2017746.06;ACC=0;REJ=0;SOL=0;ACCMN=0.000;DIFF=148364561003867.406250;TEMP=0.0;FAN=0;FREQ=0;UPTIME=149;TS=1794612170|";
+        let s = parse_api_summary(reply).unwrap();
+        assert!((s.hashrate / 1e9 - 2.0177).abs() < 1e-3);
+        assert_eq!(s.device.as_deref(), Some("AMD Radeon RX 7700 XT"));
+
+        let mut st = LogState::default();
+        for l in [
+            "[2026-11-13 23:20:21] Stratum connection established",
+            "[2026-11-13 23:20:21] New Work: Block 975724, Netdiff 1.4836e14, Job 6af4689e00001c69",
+            "                      Hash rate          (1914.29Mh/s)",
+            "                      Submitted          0",
+            "                      Accepted           0",
+        ] {
+            st.feed(l);
+        }
+        assert!(st.connected);
+        assert_eq!(st.block, Some(975724));
+        assert_eq!(st.netdiff, Some(1.4836e14));
+        assert_eq!(st.hashrate, Some(1914.29e6));
+        st.feed("[2026-11-13 23:25:00] Stratum connection interrupted: pool closed the connection");
+        assert!(!st.connected);
+        assert!(st.last_error.as_deref().unwrap().contains("pool closed"));
+        st.feed("[2026-11-13 23:25:05] Stratum connection established");
+        assert!(st.last_error.is_none());
+        st.feed("GPU init failed: no matching GPU adapter (try --list-devices)");
+        assert!(st.last_error.as_deref().unwrap().starts_with("GPU init failed"));
     }
 
     #[test]

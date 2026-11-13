@@ -59,6 +59,39 @@ pub fn command_line(settings: &Settings, index: u32, port: u16) -> Vec<String> {
     ]
 }
 
+/// gpu-miner.exe: the configured path, or next to this app's exe.
+pub fn gpu_miner_path(settings: &Settings) -> std::path::PathBuf {
+    let configured = settings.gpu.exe.trim();
+    if !configured.is_empty() {
+        return configured.into();
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("gpu-miner.exe")))
+        .unwrap_or_else(|| "gpu-miner.exe".into())
+}
+
+pub fn gpu_command_line(settings: &Settings) -> Vec<String> {
+    let g = &settings.gpu;
+    let mut args = vec![
+        "-o".into(),
+        settings.pool_url.trim().into(),
+        "-u".into(),
+        format!("{}.{}", settings.address.trim(), g.worker.trim()),
+        "-p".into(),
+        settings.password.clone(),
+        "-b".into(),
+        format!("127.0.0.1:{}", g.api_port),
+        "--intensity".into(),
+        g.intensity.to_string(),
+    ];
+    if !g.device.trim().is_empty() {
+        args.push("--device".into());
+        args.push(g.device.trim().into());
+    }
+    args
+}
+
 impl Miner {
     pub fn is_running(&self) -> bool {
         !self.instances.is_empty()
@@ -94,29 +127,47 @@ impl Miner {
         for i in 0..settings.instances {
             let port = settings.api_base_port + i as u16;
             let args = command_line(settings, i, port);
-            let mut child = Command::new(&settings.miner_exe)
-                .args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .creation_flags(IDLE_PRIORITY_CLASS | CREATE_NO_WINDOW)
-                .spawn()
-                .map_err(|e| format!("cannot start {}: {e}", settings.miner_exe))?;
-            let log = Arc::new(Mutex::new(LogState::default()));
-            if let Some(out) = child.stdout.take() {
-                spawn_reader(out, log.clone());
-            }
-            if let Some(err) = child.stderr.take() {
-                spawn_reader(err, log.clone());
-            }
-            self.instances.push(Instance {
-                index: i,
-                port,
-                started: Instant::now(),
-                log,
-                child,
-            });
+            self.spawn_instance(&settings.miner_exe, &args, i, port)?;
         }
+        Ok(())
+    }
+
+    /// Starts the GPU miner (one process) from settings.
+    pub fn start_gpu(&mut self, settings: &Settings) -> Result<(), String> {
+        if self.is_running() {
+            return Ok(());
+        }
+        let exe = gpu_miner_path(settings);
+        if !exe.exists() {
+            return Err(format!("GPU miner not found at {}", exe.display()));
+        }
+        let args = gpu_command_line(settings);
+        self.spawn_instance(&exe.display().to_string(), &args, 0, settings.gpu.api_port)
+    }
+
+    fn spawn_instance(&mut self, exe: &str, args: &[String], index: u32, port: u16) -> Result<(), String> {
+        let mut child = Command::new(exe)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(IDLE_PRIORITY_CLASS | CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("cannot start {exe}: {e}"))?;
+        let log = Arc::new(Mutex::new(LogState::default()));
+        if let Some(out) = child.stdout.take() {
+            spawn_reader(out, log.clone());
+        }
+        if let Some(err) = child.stderr.take() {
+            spawn_reader(err, log.clone());
+        }
+        self.instances.push(Instance {
+            index,
+            port,
+            started: Instant::now(),
+            log,
+            child,
+        });
         Ok(())
     }
 
@@ -133,6 +184,25 @@ impl Miner {
     /// on Quit" off). They then show up as a foreign miner on the next launch.
     pub fn detach(&mut self) {
         self.instances.clear();
+    }
+
+    /// Like reap_exited, but returns why each exited instance stopped
+    /// (its last error line, or its exit code).
+    pub fn reap_exited_errors(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.instances.retain_mut(|i| match i.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                let last = i.log.lock().ok().and_then(|l| l.last_error.clone());
+                out.push(last.unwrap_or_else(|| format!("exit code {:?}", status.code())));
+                false
+            }
+            Err(e) => {
+                out.push(e.to_string());
+                false
+            }
+        });
+        out
     }
 
     /// Drops instances whose process has exited on its own.
@@ -283,6 +353,51 @@ mod tests {
         for pid in &pids {
             assert!(!alive(*pid), "pid {pid} still running");
         }
+    }
+
+    /// Live test of the app's GPU path: `cargo test -- --ignored live_gpu`.
+    /// Needs target\release\gpu-miner.exe (cargo build --release --workspace).
+    #[test]
+    #[ignore]
+    fn live_gpu_start_query_stop() {
+        let mut s = Settings::default();
+        s.gpu.exe = concat!(env!("CARGO_MANIFEST_DIR"), r"\target\release\gpu-miner.exe").into();
+        s.gpu.api_port = 4070; // away from a running app's port
+        let mut m = Miner::default();
+        m.start_gpu(&s).expect("start gpu");
+        let pids = m.pids();
+        assert_eq!(pids.len(), 1);
+        assert_eq!(priority(pids[0]), Some(IDLE_PRIORITY_CLASS));
+        let t0 = Instant::now();
+        while !m.handles()[0].log.lock().unwrap().connected {
+            assert!(t0.elapsed() < Duration::from_secs(60), "gpu-miner did not connect");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        std::thread::sleep(Duration::from_secs(20));
+        let sum = query_summary(4070).expect("gpu API answers");
+        println!(
+            "gpu: {:.2} GH/s on {:?}, connected after {:?}",
+            sum.hashrate / 1e9,
+            sum.device,
+            t0.elapsed()
+        );
+        assert!(sum.hashrate > 1e8, "GPU hashrate too low: {}", sum.hashrate);
+        m.stop();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!alive(pids[0]), "gpu-miner still running");
+    }
+
+    #[test]
+    fn gpu_command_line_from_settings() {
+        let mut s = Settings::default();
+        let joined = gpu_command_line(&s).join(" ");
+        assert!(joined.contains("-o stratum+tcp://eusolo.ckpool.org:3333"));
+        assert!(joined.contains("-u bc1qq4ndwhp5r350h9g7pygdgcu52hrg8744v3xmgk.desktopgpu"));
+        assert!(joined.contains("-b 127.0.0.1:4060"));
+        assert!(joined.contains("--intensity 25"));
+        assert!(!joined.contains("--device"));
+        s.gpu.device = "7700".into();
+        assert!(gpu_command_line(&s).join(" ").contains("--device 7700"));
     }
 
     #[test]
