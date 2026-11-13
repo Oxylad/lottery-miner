@@ -12,11 +12,13 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Remote read-only probe. One ssh round trip; the 10 s energy gap is inside.
 /// Only fixed commands; no user text is interpolated.
-const PROBE: &str = "systemctl is-active cpuminer; echo ---SHOW; systemctl show cpuminer -p ActiveEnterTimestamp -p NRestarts; echo ---LOG; sudo -n journalctl -u cpuminer -o cat -n 300; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
+const PROBE: &str = "systemctl is-active cpuminer; echo ---SHOW; systemctl show cpuminer -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u cpuminer -o cat -n 300; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OxyhomeStats {
     pub service_active: bool,
+    /// False when systemd reports LoadState=not-found for cpuminer.service.
+    pub unit_found: bool,
     pub active_since: Option<String>,
     pub restarts: Option<u32>,
     pub log: LogState,
@@ -129,7 +131,10 @@ pub fn probe(target: &SshTarget) -> Result<OxyhomeStats, String> {
 
 /// Splits the probe output on its ---MARKER lines and parses each part.
 pub fn parse_probe(text: &str) -> OxyhomeStats {
-    let mut stats = OxyhomeStats::default();
+    let mut stats = OxyhomeStats {
+        unit_found: true,
+        ..Default::default()
+    };
     let mut section = "";
     let mut parts: std::collections::HashMap<&str, Vec<&str>> = Default::default();
     for line in text.lines() {
@@ -154,6 +159,8 @@ pub fn parse_probe(text: &str) -> OxyhomeStats {
             stats.active_since = Some(v.trim().to_string());
         } else if let Some(v) = line.strip_prefix("NRestarts=") {
             stats.restarts = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("LoadState=") {
+            stats.unit_found = v.trim() != "not-found";
         }
     }
     let log_text = parts.get("LOG").map(|v| v.join("\n")).unwrap_or_default();
@@ -204,6 +211,15 @@ Package id 0:  +61.0°C  (high = +86.0°C, crit = +100.0°C)
         assert_eq!(s.log.accepted, 9);
         assert_eq!(s.temp_c, Some(61.0));
         assert_eq!(s.watts, Some(82.0));
+    }
+
+    #[test]
+    fn missing_unit_is_detected() {
+        // Real output from a server without cpuminer.service.
+        let s = parse_probe("inactive\n---SHOW\nNRestarts=0\nLoadState=not-found\nActiveEnterTimestamp=\n---LOG\n---TEMP\n---ENERGY\n");
+        assert!(!s.unit_found);
+        assert!(!s.service_active);
+        assert!(parse_probe(PROBE_OUT).unit_found);
     }
 
     #[test]

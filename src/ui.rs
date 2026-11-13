@@ -284,10 +284,15 @@ impl Render for Dashboard {
 
         // ---- home server over SSH
         let busy = self.oxyhome_busy;
+        let can_control = !busy && self.oxyhome_unit_present();
         let target = &self.settings.oxyhome;
         let (dot, status): (u32, String) = match &self.oxyhome {
             None => (MUTED, "connecting...".into()),
             Some(Err(_)) => (ERROR, "cannot connect".into()),
+            Some(Ok(s)) if !s.unit_found => (
+                WARN,
+                "connected, but this server has no cpuminer.service".into(),
+            ),
             Some(Ok(s)) if s.service_active => (
                 GOOD,
                 format!("cpuminer active, {}", fmt_hr(s.log.hashrate)),
@@ -323,9 +328,9 @@ impl Render for Dashboard {
             div()
                 .flex()
                 .gap_2()
-                .child(button("Start", !busy, cx, |d, cx| d.oxyhome_control(ServiceAction::Start, cx)))
-                .child(button("Stop", !busy, cx, |d, cx| d.oxyhome_control(ServiceAction::Stop, cx)))
-                .child(button("Restart", !busy, cx, |d, cx| d.oxyhome_control(ServiceAction::Restart, cx))),
+                .child(button("Start", can_control, cx, |d, cx| d.oxyhome_control(ServiceAction::Start, cx)))
+                .child(button("Stop", can_control, cx, |d, cx| d.oxyhome_control(ServiceAction::Stop, cx)))
+                .child(button("Restart", can_control, cx, |d, cx| d.oxyhome_control(ServiceAction::Restart, cx))),
         );
         match &self.oxyhome {
             None => oxy = oxy.child(note("Connecting over SSH...", MUTED)),
@@ -336,7 +341,7 @@ impl Render for Dashboard {
                     if s.service_active { "active" } else { "not active" },
                     if s.service_active { GOOD } else { WARN },
                 ));
-                if let Some(since) = &s.active_since {
+                if let Some(since) = s.active_since.as_ref().filter(|v| !v.is_empty()) {
                     oxy = oxy.child(row("Active since", since.clone()));
                 }
                 if let Some(r) = s.restarts {
@@ -397,7 +402,12 @@ impl Render for Dashboard {
         for r in odds_rows("This PC", Some(total), &net) {
             odds_card = odds_card.child(r);
         }
-        for r in odds_rows("oxyhome", oxy_hr, &net) {
+        let server_name = if self.settings.oxyhome.name.is_empty() {
+            self.settings.oxyhome.host.clone()
+        } else {
+            self.settings.oxyhome.name.clone()
+        };
+        for r in odds_rows(&server_name, oxy_hr, &net) {
             odds_card = odds_card.child(r);
         }
         for r in odds_rows("Combined", combined, &net) {

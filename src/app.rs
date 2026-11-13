@@ -278,9 +278,21 @@ impl Dashboard {
         }
     }
 
+    /// False only once the server answered that cpuminer.service does not exist.
+    pub fn oxyhome_unit_present(&self) -> bool {
+        !matches!(&self.oxyhome, Some(Ok(s)) if !s.unit_found)
+    }
+
     /// Runs systemctl start|stop|restart cpuminer on oxyhome in the background.
     pub fn oxyhome_control(&mut self, action: ServiceAction, cx: &mut Context<Self>) {
         if self.oxyhome_busy {
+            return;
+        }
+        if !self.oxyhome_unit_present() {
+            self.message = Some(format!(
+                "{} has no cpuminer.service; nothing to start or stop.",
+                self.settings.oxyhome.host
+            ));
             return;
         }
         self.oxyhome_busy = true;

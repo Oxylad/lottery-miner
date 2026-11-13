@@ -124,7 +124,9 @@ pub fn default_path() -> PathBuf {
 /// Loads settings; a missing file gives the defaults, a broken file is an error.
 pub fn load_from(path: &Path) -> Result<Settings, String> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("settings: {e}")),
+        // Editors on Windows may add a UTF-8 BOM, which serde_json rejects.
+        Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}'))
+            .map_err(|e| format!("settings: {e}")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(e) => Err(format!("settings: {e}")),
     }
@@ -170,6 +172,14 @@ mod tests {
         let s = load_from(&path).unwrap();
         assert_eq!(s.instances, 3);
         assert_eq!(s.threads_per_instance, 4);
+    }
+
+    #[test]
+    fn bom_is_accepted() {
+        let path = temp_file("bom");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "\u{feff}{\"worker\": \"pc\"}").unwrap();
+        assert_eq!(load_from(&path).unwrap().worker, "pc");
     }
 
     #[test]
