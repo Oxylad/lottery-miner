@@ -67,6 +67,9 @@ does not count as activity (Windows GetLastInputInfo).
 Everything in one place, newest first: each CPU instance, the GPU miner,
 app events (starts, stops, idle mode, server commands, SSH errors) and the
 home server journal (read with `journalctl -o short-unix`, no duplicates).
+Every line gets one UTC timestamp (the journal's own time for server lines,
+arrival time otherwise) and the view is sorted by it; the miners' own
+prefixes are removed because cpuminer writes local time and gpu-miner UTC.
 Filter by source, Copy to the clipboard, Clear. Kept in memory only (last
 5000 lines).
 

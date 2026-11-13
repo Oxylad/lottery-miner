@@ -871,7 +871,7 @@ impl Dashboard {
                     .gap_2()
                     .items_center()
                     .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
-                        "showing {} of {} (newest first)",
+                        "times in UTC, showing {} of {} (newest first)",
                         lines.len(),
                         total
                     )))
@@ -904,6 +904,13 @@ impl Dashboard {
                 div()
                     .flex()
                     .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(60.))
+                            .text_color(rgb(MUTED))
+                            .child(logbook::utc_time(l.at)),
+                    )
                     .child(
                         div()
                             .flex_none()
