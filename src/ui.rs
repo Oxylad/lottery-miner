@@ -581,10 +581,17 @@ impl Render for Dashboard {
             let v = !d.settings.start_at_login;
             d.set_start_at_login(v);
         }));
-        set = set.child(toggle("Stop miners on Quit", s.stop_miners_on_quit, cx, |d, _| {
+        set = set.child(toggle("Stop this PC's miners on Quit", s.stop_miners_on_quit, cx, |d, _| {
             d.settings.stop_miners_on_quit = !d.settings.stop_miners_on_quit;
             d.save_settings();
         }));
+        set = set.child(note(
+            format!(
+                "{} is never stopped when this app quits or crashes; it only changes when you press its Start, Stop or Restart.",
+                server_name
+            ),
+            MUTED,
+        ));
         set = set.child(
             div()
                 .flex()
