@@ -435,6 +435,24 @@ impl Render for Dashboard {
 
         // ---- pool
         let mut pool = card("Pool (eusolo.ckpool.org)");
+        let pool_url = network::pool_user_url(&self.settings.address);
+        pool = pool.child(
+            div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(pool_url.clone()),
+                )
+                .child(button("Open on ckpool", true, cx, move |_, cx| {
+                    cx.open_url(&pool_url);
+                })),
+        );
         match &self.pool {
             None => pool = pool.child(note("Loading...", MUTED)),
             Some(Err(e)) => pool = pool.child(note(e.clone(), ERROR)),

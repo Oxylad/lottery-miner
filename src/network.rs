@@ -90,8 +90,13 @@ pub fn parse_pool_user(v: &Value) -> PoolUser {
     }
 }
 
+/// The pool's status page for this address (also what the app reads).
+pub fn pool_user_url(address: &str) -> String {
+    format!("https://eusolo.ckpool.org/users/{}", address.trim())
+}
+
 pub fn fetch_pool_user(address: &str) -> Result<Option<PoolUser>, String> {
-    let url = format!("https://eusolo.ckpool.org/users/{}", address.trim());
+    let url = pool_user_url(address);
     Ok(remote::get_json(&url)?.map(|v| parse_pool_user(&v)))
 }
 
@@ -200,6 +205,14 @@ mod tests {
         // (3.125 + 0.0304) x 0.98 x 62006, about 191.7 thousand EUR
         let prize = odds::prize_eur(fees, 62006.0);
         assert!((prize / 1000.0 - 191.7).abs() < 0.2, "got {prize}");
+    }
+
+    #[test]
+    fn pool_link() {
+        assert_eq!(
+            pool_user_url(" bc1qxyz "),
+            "https://eusolo.ckpool.org/users/bc1qxyz"
+        );
     }
 
     #[test]
