@@ -21,11 +21,11 @@
   <circle cx="128" cy="128" r="119" fill="none" stroke="#8A4500" stroke-opacity="0.35" stroke-width="2"/>
 
   <!-- tilted number disc with the Bitcoin B -->
-  <g transform="rotate(-14 128 132)">
-    <circle cx="128" cy="132" r="70" fill="url(#disc)"/>
-    <circle cx="128" cy="132" r="70" fill="none" stroke="#B85E00" stroke-opacity="0.25" stroke-width="3"/>
+  <g transform="rotate(-14 128 128)">
+    <circle cx="128" cy="128" r="70" fill="url(#disc)"/>
+    <circle cx="128" cy="128" r="70" fill="none" stroke="#B85E00" stroke-opacity="0.25" stroke-width="3"/>
     <!-- B: stem, two bowls, and the two pairs of bars above and below -->
-    <g fill="#1B1D22">
+    <g fill="#1B1D22" transform="translate(-10.5 -4)">
       <rect x="114" y="76" width="9" height="16" rx="2"/>
       <rect x="131" y="76" width="9" height="16" rx="2"/>
       <rect x="114" y="172" width="9" height="16" rx="2"/>
