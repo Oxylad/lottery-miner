@@ -4,6 +4,7 @@
 
 mod app;
 mod input;
+mod job;
 mod logbook;
 mod miner;
 mod network;
@@ -147,6 +148,7 @@ fn spawn_tray_loop(tray: Tray, dashboard: Entity<Dashboard>, cx: &mut App) {
                         } else {
                             d.miner.detach();
                             d.gpu_miner.detach();
+                            crate::job::kill_miners_on_exit(false);
                         }
                     });
                     cx.quit();

@@ -53,6 +53,10 @@ Live miner test (starts the real miner for about a minute):
 cargo test -- --ignored live_ --nocapture
 ```
 
+Miners are placed in a Windows Job Object with kill-on-close, so if the app
+ends without Quit (End task, crash) Windows stops them too; no orphaned
+miners. Quit with "Stop this PC's miners on Quit" off clears that first.
+
 ## Idle mining
 
 Like Salad: turn on "Mine when this PC is idle", pick the delay on the slider

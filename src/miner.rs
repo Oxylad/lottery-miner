@@ -176,6 +176,12 @@ impl Miner {
             .creation_flags(IDLE_PRIORITY_CLASS | CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| format!("cannot start {exe}: {e}"))?;
+        // Tie the miner to this app: Windows stops it if the app ends without Quit.
+        if let Err(e) = crate::job::adopt(&child) {
+            if let Some(Ok(mut b)) = self.book.as_ref().map(|b| b.lock()) {
+                b.push(Source::App, &format!("warning: {}: {e}", source.label()));
+            }
+        }
         let log = Arc::new(Mutex::new(LogState::default()));
         if let Some(out) = child.stdout.take() {
             spawn_reader(out, log.clone(), self.book.clone(), source);
@@ -358,6 +364,9 @@ mod tests {
         m.start(&s).expect("start");
         let pids = m.pids();
         assert_eq!(pids.len(), s.instances as usize);
+        for inst in &m.instances {
+            assert!(crate::job::owns(&inst.child), "miner not in the job object");
+        }
         for pid in &pids {
             assert_eq!(priority(*pid), Some(IDLE_PRIORITY_CLASS), "pid {pid} not idle priority");
         }
