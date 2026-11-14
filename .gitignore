@@ -1,3 +1,10 @@
+# Build output
 /target
+debug
 *.pdb
+**/*.rs.bk
+**/mutants.out*/
+rustc-ice-*.txt
+
+# Local app settings (contain your address and SSH target)
 settings.json
