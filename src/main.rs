@@ -31,6 +31,13 @@ use app::Dashboard;
 use remote::ServiceAction;
 
 /// Orange disc on transparent background, drawn in code (no asset files).
+/// The logo from the exe's icon resource (#1, see assets/app.rc) at the
+/// system's small-icon size; the drawn disc below only if that fails.
+fn app_tray_icon() -> tray_icon::Icon {
+    let size = win::small_icon_size();
+    tray_icon::Icon::from_resource(1, Some((size, size))).unwrap_or_else(|_| tray_icon_image())
+}
+
 fn tray_icon_image() -> tray_icon::Icon {
     let n = 32u32;
     let mut rgba = Vec::with_capacity((n * n * 4) as usize);
@@ -85,7 +92,7 @@ fn build_tray() -> Result<Tray, String> {
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
         .with_tooltip("Lottery Miner")
-        .with_icon(tray_icon_image())
+        .with_icon(app_tray_icon())
         .build()
         .map_err(|e| e.to_string())?;
     Ok(Tray {

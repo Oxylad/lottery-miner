@@ -1,6 +1,6 @@
 [package]
 name = "lottery-miner"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "Windows tray app to run and watch a solo Bitcoin CPU miner and a home-server miner"
 publish = false
@@ -19,3 +19,6 @@ lto = "thin"
 
 [workspace]
 members = [".", "gpu-miner"]
+
+[build-dependencies]
+embed-resource = "=3.0.12"

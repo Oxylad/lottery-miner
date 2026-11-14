@@ -52,6 +52,7 @@ unsafe extern "system" {
     fn CreateJobObjectW(attributes: *const core::ffi::c_void, name: *const u16) -> isize;
     fn SetInformationJobObject(job: isize, class: i32, info: *const core::ffi::c_void, len: u32) -> i32;
     fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+    #[cfg(test)]
     fn IsProcessInJob(process: isize, job: isize, result: *mut i32) -> i32;
     fn GetLastError() -> u32;
 }
@@ -95,7 +96,8 @@ pub fn adopt(child: &Child) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether the child is in the miners' job (for checks and tests).
+#[cfg(test)]
+/// Whether the child is in the miners' job (for tests).
 pub fn owns(child: &Child) -> bool {
     let Some(job) = job() else { return false };
     let mut result = 0i32;

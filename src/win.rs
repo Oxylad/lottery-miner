@@ -63,6 +63,18 @@ pub fn keep_awake(on: bool) {
     }
 }
 
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetSystemMetrics(index: i32) -> i32;
+}
+
+/// Size Windows uses for small icons like the tray (16 at 100% scaling).
+pub fn small_icon_size() -> u32 {
+    const SM_CXSMICON: i32 = 49;
+    let s = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    if s > 0 { s as u32 } else { 16 }
+}
+
 pub fn hide_window(hwnd: isize) {
     unsafe {
         ShowWindow(hwnd, SW_HIDE);

@@ -1,0 +1,3 @@
+// Icon resource #1: Explorer, the taskbar, the GPUI window (it loads ID 1)
+// and the tray icon all use it.
+1 ICON "lottery-miner.ico"

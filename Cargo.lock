@@ -2419,6 +2419,7 @@ dependencies = [
 name = "gpu-miner"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "pollster 1.0.1",
  "serde_json",
  "wgpu",
@@ -3498,8 +3499,9 @@ dependencies = [
 
 [[package]]
 name = "lottery-miner"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
+ "embed-resource",
  "gpui",
  "raw-window-handle",
  "serde",

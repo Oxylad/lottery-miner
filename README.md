@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="Lottery Miner" width="440"></p>
+
 # Lottery Miner
 
 Windows tray app (Rust, GPUI + tray-icon) that runs a solo Bitcoin CPU miner
@@ -103,3 +105,11 @@ gpu-miner.exe -o stratum+tcp://eusolo.ckpool.org:3333 -u <address>.desktopgpu -p
 Note: Cargo.lock pins `gpu-allocator`'s `windows` dependency to 0.62 (what
 wgpu-hal 30 needs); gpui uses 0.61. If `cargo update` reverts it, the DX12
 backend fails to compile with type mismatches in wgpu-hal.
+
+## Logo and icons
+
+`assets/icon.svg` (the full icon), `assets/icon-small.svg` (16-32 px variant)
+and `assets/logo.svg` (icon plus wordmark, for dark backgrounds) are the
+sources. `assets/make-icons.ps1` renders them with headless Edge and packs
+`assets/lottery-miner.ico` (16-256 px). `build.rs` embeds it as icon
+resource #1 in both exes; the window and the tray icon load it from there.

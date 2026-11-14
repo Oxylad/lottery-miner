@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Small-size variant (16-32 px): bigger, untilted disc and B, no thin strokes. -->
+  <defs>
+    <radialGradient id="ball" cx="38%" cy="32%" r="75%">
+      <stop offset="0%" stop-color="#FFB547"/>
+      <stop offset="50%" stop-color="#F7931A"/>
+      <stop offset="100%" stop-color="#C46A00"/>
+    </radialGradient>
+  </defs>
+  <circle cx="128" cy="128" r="126" fill="url(#ball)"/>
+  <circle cx="128" cy="128" r="88" fill="#FFFFFF"/>
+  <g transform="translate(128 128) scale(1.32) translate(-138 -132)" fill="#1B1D22">
+    <rect x="114" y="76" width="10" height="16" rx="2"/>
+    <rect x="131" y="76" width="10" height="16" rx="2"/>
+    <rect x="114" y="172" width="10" height="16" rx="2"/>
+    <rect x="131" y="172" width="10" height="16" rx="2"/>
+    <path d="M100 88 H145 C163 88 173 98 173 112 C173 122 167 129 158 132
+             C170 135 177 143 177 155 C177 171 165 176 148 176 H100 V162 H108 V102 H100 Z
+             M124 102 V125 H143 C152 125 156 121 156 113.5 C156 106 152 102 143 102 Z
+             M124 139 V162 H146 C155 162 160 158 160 150.5 C160 143 155 139 146 139 Z"
+          fill-rule="evenodd"/>
+  </g>
+</svg>
