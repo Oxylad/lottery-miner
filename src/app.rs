@@ -375,6 +375,29 @@ impl Dashboard {
     }
 
     /// Stops everything this app started on this PC (never the home server).
+    /// Quick start: the CPU miners and the GPU miner, with the saved
+    /// settings. Starts only what is not already running.
+    pub fn quick_start(&mut self) {
+        if let Some(hint) = self.settings.quick_start_hint() {
+            self.message = Some(hint.to_string());
+            return;
+        }
+        if !self.miner.is_running() {
+            self.start_mining();
+        }
+        let cpu_error = self.message.take();
+        if !self.gpu_miner.is_running() {
+            self.start_gpu();
+        }
+        // Keep both errors visible if both failed.
+        self.message = match (cpu_error, self.message.take()) {
+            (Some(c), Some(g)) => Some(format!("CPU: {c}  GPU: {g}")),
+            (Some(c), None) => Some(format!("CPU: {c}")),
+            (None, Some(g)) => Some(format!("GPU: {g}")),
+            (None, None) => None,
+        };
+    }
+
     pub fn stop_local_miners(&mut self) {
         self.stop_mining();
         self.stop_gpu();

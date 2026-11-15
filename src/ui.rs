@@ -223,25 +223,13 @@ impl Render for Dashboard {
 
         // ---- this PC
         let mut local = card("This PC (cpuminer-opt)");
-        // Quick start: the same action as the tray's Start CPU mining, with
-        // the saved settings; disabled with a hint if they are incomplete.
-        let quick_hint = self.settings.quick_start_hint();
         local = local.child(
             div()
                 .flex()
                 .gap_2()
-                .child(button(
-                    "Quick start",
-                    !running && quick_hint.is_none(),
-                    cx,
-                    |d, _| d.start_mining(),
-                ))
                 .child(button("Start CPU mining", !running, cx, |d, _| d.start_mining()))
                 .child(button("Stop CPU mining", running, cx, |d, _| d.stop_mining())),
         );
-        if let (Some(hint), false) = (quick_hint, running) {
-            local = local.child(note(format!("Quick start: {hint}"), WARN));
-        }
         local = local.child(row_colored(
             "Status",
             if running {
@@ -744,6 +732,13 @@ impl Render for Dashboard {
                 d.save_settings();
             }));
 
+        // Header controls: Quick start (CPU + GPU) and Stop all (this PC only).
+        let cpu_on = self.miner.is_running();
+        let gpu_on = self.gpu_miner.is_running();
+        let all_running = cpu_on && gpu_on;
+        let any_running = cpu_on || gpu_on;
+        let quick_hint = self.settings.quick_start_hint();
+        let quick_ok = !all_running && quick_hint.is_none();
         let mut root = div()
             .id("root")
             .size_full()
@@ -762,11 +757,35 @@ impl Render for Dashboard {
                     .child(div().text_xl().font_weight(FontWeight::BOLD).child("Lottery Miner"))
                     .child(
                         div()
-                            .text_xl()
-                            .text_color(rgb(ACCENT))
-                            .child(fmt_hr(combined.filter(|c| *c > 0.0))),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(button(
+                                "Quick start",
+                                quick_ok,
+                                cx,
+                                |d, _| d.quick_start(),
+                            ))
+                            .child(button(
+                                "Stop all (this PC)",
+                                any_running,
+                                cx,
+                                |d, _| d.stop_local_miners(),
+                            ))
+                            .child(
+                                // Fixed width so the buttons don't jump as the number changes.
+                                div()
+                                    .w(px(130.))
+                                    .text_right()
+                                    .text_xl()
+                                    .text_color(rgb(ACCENT))
+                                    .child(fmt_hr(combined.filter(|c| *c > 0.0))),
+                            ),
                     ),
             );
+        if let Some(hint) = quick_hint.filter(|_| !all_running) {
+            root = root.child(note(format!("Quick start: {hint}"), WARN));
+        }
         if let Some(m) = &self.message {
             root = root.child(
                 div()
