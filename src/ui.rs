@@ -223,13 +223,25 @@ impl Render for Dashboard {
 
         // ---- this PC
         let mut local = card("This PC (cpuminer-opt)");
+        // Quick start: the same action as the tray's Start CPU mining, with
+        // the saved settings; disabled with a hint if they are incomplete.
+        let quick_hint = self.settings.quick_start_hint();
         local = local.child(
             div()
                 .flex()
                 .gap_2()
+                .child(button(
+                    "Quick start",
+                    !running && quick_hint.is_none(),
+                    cx,
+                    |d, _| d.start_mining(),
+                ))
                 .child(button("Start CPU mining", !running, cx, |d, _| d.start_mining()))
                 .child(button("Stop CPU mining", running, cx, |d, _| d.stop_mining())),
         );
+        if let (Some(hint), false) = (quick_hint, running) {
+            local = local.child(note(format!("Quick start: {hint}"), WARN));
+        }
         local = local.child(row_colored(
             "Status",
             if running {

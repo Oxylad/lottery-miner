@@ -175,6 +175,18 @@ impl Settings {
         block << (t * i)
     }
 
+    /// Why Quick start can't run with these settings (None = it can).
+    /// Only checks that the miner path and the address are filled in.
+    pub fn quick_start_hint(&self) -> Option<&'static str> {
+        if self.miner_exe.trim().is_empty() {
+            Some("Set the miner executable in Settings first.")
+        } else if self.address.trim().is_empty() {
+            Some("Set the Bitcoin address in Settings first.")
+        } else {
+            None
+        }
+    }
+
     /// Problems with the current values, empty when all is fine.
     pub fn validate(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -289,6 +301,20 @@ mod tests {
         assert_eq!(s.affinity_mask(1), 0x00F0);
         assert_eq!(s.affinity_mask(2), 0x0F00);
         assert_eq!(s.affinity_mask(3), 0xF000);
+    }
+
+    #[test]
+    fn quick_start_needs_miner_path_and_address() {
+        let mut s = Settings::default();
+        assert_eq!(s.quick_start_hint(), None);
+        s.miner_exe = "   ".into();
+        assert!(s.quick_start_hint().unwrap().contains("miner executable"));
+        s.miner_exe = r"C:\cpuminer\cpuminer-avx512-sha-vaes.exe".into();
+        s.address = String::new();
+        assert!(s.quick_start_hint().unwrap().contains("Bitcoin address"));
+        s.miner_exe = String::new();
+        // The miner path is reported first when both are missing.
+        assert!(s.quick_start_hint().unwrap().contains("miner executable"));
     }
 
     #[test]
