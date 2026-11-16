@@ -13,7 +13,7 @@ use crate::input::TextInput;
 use crate::network::{self, Network};
 use crate::odds;
 use crate::remote::ServiceAction;
-use crate::settings::{IDLE_STEPS, MAX_MHS_PER_INSTANCE};
+use crate::settings::{Coin, IDLE_STEPS, MAX_MHS_PER_INSTANCE};
 
 const BG: u32 = 0x1b1d22;
 const CARD: u32 = 0x252830;
@@ -222,7 +222,11 @@ impl Render for Dashboard {
         let net = self.network_numbers();
 
         // ---- this PC
-        let mut local = card("This PC (cpuminer-opt)");
+        let cpu_coin = if running { self.cpu_coin } else { self.settings.coin };
+        let mut local = card(match cpu_coin {
+            Coin::Bitcoin => "This PC CPU: Bitcoin (cpuminer-opt)",
+            Coin::Monero => "This PC CPU: Monero (XMRig)",
+        });
         local = local.child(
             div()
                 .flex()
@@ -293,13 +297,13 @@ impl Render for Dashboard {
             Some(Err(_)) => (ERROR, "cannot connect".into()),
             Some(Ok(s)) if !s.unit_found => (
                 WARN,
-                "connected, but this server has no cpuminer.service".into(),
+                format!("connected, but this server has no {}.service", s.unit),
             ),
             Some(Ok(s)) if s.service_active => (
                 GOOD,
-                format!("cpuminer active, {}", fmt_hr(s.log.hashrate)),
+                format!("{} active ({}), {}", s.unit, if s.unit == "xmrig" { "Monero" } else { "Bitcoin" }, fmt_hr(s.log.hashrate)),
             ),
-            Some(Ok(_)) => (WARN, "connected, cpuminer not active".into()),
+            Some(Ok(s)) => (WARN, format!("connected, {} not active", s.unit)),
         };
         let mut oxy = card("Home server (SSH)");
         oxy = oxy.child(
@@ -436,6 +440,67 @@ impl Render for Dashboard {
         }
 
         // ---- pool
+        // ---- Monero (CPU miners on RandomX, via a pool)
+        let xmr_local = self.xmr_local_hashrate();
+        let xmr_oxy = self.oxyhome_xmr_hashrate();
+        let xmr_total = xmr_local + xmr_oxy.unwrap_or(0.0);
+        let mut monero = card("Monero (CPUs, pool)");
+        monero = monero.child(row_colored(
+            "CPUs set to",
+            match self.settings.coin {
+                Coin::Bitcoin => "Bitcoin",
+                Coin::Monero => "Monero",
+            },
+            if self.settings.coin == Coin::Monero { GOOD } else { MUTED },
+        ));
+        monero = monero
+            .child(row("This PC (XMRig)", fmt_hr(Some(xmr_local).filter(|h| *h > 0.0))))
+            .child(row("oxyhome (xmrig)", fmt_hr(xmr_oxy)))
+            .child(row("Total", fmt_hr(Some(xmr_total).filter(|h| *h > 0.0))));
+        match &self.xmr_net {
+            None => monero = monero.child(note("Loading Monero network numbers...", MUTED)),
+            Some(Err(e)) => monero = monero.child(note(format!("Monero stats: {e}"), ERROR)),
+            Some(Ok(n)) => {
+                if let Some(per_day) = network::xmr_per_day(xmr_total, n) {
+                    let eur = n.eur_per_xmr.unwrap_or(0.0);
+                    monero = monero
+                        .child(row(
+                            "Expected per day",
+                            format!("{per_day:.5} XMR = EUR {:.2}", per_day * eur),
+                        ))
+                        .child(row(
+                            "Expected per year",
+                            format!("{:.3} XMR = EUR {:.0}", per_day * 365.0, per_day * 365.0 * eur),
+                        ));
+                } else {
+                    monero = monero.child(row("Expected earnings", "not mining Monero"));
+                }
+                if let Some(h) = n.hashrate {
+                    monero = monero.child(row("Network hashrate", odds::format_hashrate(h)));
+                }
+                if let (Some(r), Some(eur)) = (n.reward_xmr, n.eur_per_xmr) {
+                    monero = monero.child(row(
+                        "Block reward",
+                        format!("{r:.4} XMR = EUR {:.0} (1 XMR = EUR {eur:.2})", r * eur),
+                    ));
+                }
+            }
+        }
+        monero = monero
+            .child(note(
+                "Pool mining: steady small payouts, expected value about the same as solo. The pool's fee and XMRig's 1% donation come off the top.",
+                MUTED,
+            ))
+            .child(field("Monero address", f.xmr_address.clone(), "Payouts go here. Needed before switching to Monero."))
+            .child(field("Monero pool (TLS)", f.xmr_pool.clone(), "host:port; oxyhome uses the same pool."))
+            .child(field("XMRig executable", f.xmrig_exe.clone(), "Empty: tools\\xmrig\\xmrig.exe in the project, or next to this app."))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(button("Save", true, cx, |d, cx| d.apply_monero_form(cx))),
+            );
+
         let mut pool = card("Pool (eusolo.ckpool.org)");
         let pool_url = network::pool_user_url(&self.settings.address);
         pool = pool.child(
@@ -668,6 +733,7 @@ impl Render for Dashboard {
         // ---- GPU (gpu-miner.exe)
         let gpu_running = self.gpu_miner.is_running();
         let gs = &self.settings.gpu;
+        let gpu_note = note("Always mines Bitcoin, also when the CPUs are on Monero (RandomX is a CPU algorithm).", MUTED);
         let mut gpu = card("This PC (GPU)").child(
             div()
                 .flex()
@@ -675,6 +741,7 @@ impl Render for Dashboard {
                 .child(button("Start GPU mining", !gpu_running, cx, |d, _| d.start_gpu()))
                 .child(button("Stop GPU mining", gpu_running, cx, |d, _| d.stop_gpu())),
         );
+        gpu = gpu.child(gpu_note);
         match (&self.gpu, gpu_running) {
             (_, false) => gpu = gpu.child(row_colored("Status", "stopped", MUTED)),
             (None, true) => gpu = gpu.child(row_colored("Status", "starting (GPU self-test)", WARN)),
@@ -760,6 +827,7 @@ impl Render for Dashboard {
                             .flex()
                             .items_center()
                             .gap_3()
+                            .child(coin_switch(self.settings.coin, cx))
                             .child(button(
                                 "Quick start",
                                 quick_ok,
@@ -808,9 +876,45 @@ impl Render for Dashboard {
                 .gap_3()
                 .w_full()
                 .child(column().child(local).child(gpu).child(idle).child(oxy))
-                .child(column().child(odds_card).child(pool).child(set)),
+                .child(column().child(odds_card).child(monero).child(pool).child(set)),
         )
     }
+}
+
+/// "Bitcoin | Monero" for the CPU miners here and on the home server.
+fn coin_switch(current: Coin, cx: &Context<Dashboard>) -> AnyElement {
+    let seg = |label: &'static str, coin: Coin| {
+        let active = current == coin;
+        div()
+            .px_3()
+            .py_1()
+            .text_sm()
+            .cursor_pointer()
+            .text_color(rgb(if active { BG } else { TEXT }))
+            .bg(rgb(if active { ACCENT } else { BUTTON_OFF }))
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |d, _: &MouseDownEvent, _, cx| {
+                    d.set_coin(coin, cx);
+                    cx.notify();
+                }),
+            )
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().text_xs().text_color(rgb(MUTED)).child("CPUs:"))
+        .child(
+            div()
+                .flex()
+                .rounded_md()
+                .overflow_hidden()
+                .child(seg("Bitcoin", Coin::Bitcoin))
+                .child(seg("Monero", Coin::Monero)),
+        )
+        .into_any_element()
 }
 
 fn tab_bar(view: View, cx: &Context<Dashboard>) -> AnyElement {

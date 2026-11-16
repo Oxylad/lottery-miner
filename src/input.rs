@@ -524,6 +524,7 @@ impl Render for TextInput {
         div()
             .flex()
             .w_full()
+            .min_w(px(0.))
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
@@ -546,6 +547,8 @@ impl Render for TextInput {
             .child(
                 div()
                     .w_full()
+                    .min_w(px(0.))
+                    .overflow_hidden()
                     .px_2()
                     .py_1()
                     .rounded_md()

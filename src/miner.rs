@@ -20,6 +20,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub struct Instance {
     pub index: u32,
     pub port: u16,
+    pub kind: ApiKind,
     pub started: Instant,
     pub log: Arc<Mutex<LogState>>,
     child: Child,
@@ -30,6 +31,7 @@ pub struct Instance {
 pub struct InstanceHandle {
     pub index: u32,
     pub port: u16,
+    pub kind: ApiKind,
     pub log: Arc<Mutex<LogState>>,
     pub started: Instant,
 }
@@ -39,6 +41,73 @@ pub struct Miner {
     instances: Vec<Instance>,
     /// Where every output line also goes (the Logs tab).
     book: Option<SharedLog>,
+}
+
+/// Which stats API a miner process speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKind {
+    /// cpuminer-opt and gpu-miner: TCP "summary" request.
+    Cpuminer,
+    /// XMRig: HTTP GET /2/summary.
+    Xmrig,
+}
+
+/// xmrig.exe: the configured path, else next to this app, else the
+/// project's tools\xmrig (target\release\..\..\tools\xmrig).
+pub fn xmrig_path(settings: &Settings) -> std::path::PathBuf {
+    let configured = settings.monero.xmrig_exe.trim();
+    if !configured.is_empty() {
+        return configured.into();
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| ".".into());
+    let candidates = [
+        exe_dir.join("xmrig.exe"),
+        exe_dir.join("xmrig").join("xmrig.exe"),
+        exe_dir.join("..").join("..").join("tools").join("xmrig").join("xmrig.exe"),
+    ];
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[2].clone())
+}
+
+/// XMRig on this PC: RandomX, lowest CPU priority, local read-only HTTP API.
+pub fn xmrig_command_line(settings: &Settings) -> Vec<String> {
+    let m = &settings.monero;
+    let mut args: Vec<String> = vec![
+        "-a".into(),
+        "rx/0".into(),
+        "-o".into(),
+        m.pool.trim().into(),
+        "-u".into(),
+        m.address.trim().into(),
+        "-p".into(),
+        m.worker.trim().into(),
+        "--rig-id".into(),
+        m.worker.trim().into(),
+        "--cpu-priority".into(),
+        "0".into(),
+        "--no-color".into(),
+        // 1% is the lowest the official build allows.
+        "--donate-level".into(),
+        "1".into(),
+        "--http-host".into(),
+        "127.0.0.1".into(),
+        "--http-port".into(),
+        m.api_port.to_string(),
+    ];
+    if m.tls {
+        args.push("--tls".into());
+    }
+    if m.threads > 0 {
+        args.push("-t".into());
+        args.push(m.threads.to_string());
+    }
+    args
 }
 
 pub fn command_line(settings: &Settings, index: u32, port: u16) -> Vec<String> {
@@ -118,6 +187,7 @@ impl Miner {
             .map(|i| InstanceHandle {
                 index: i.index,
                 port: i.port,
+                kind: i.kind,
                 log: i.log.clone(),
                 started: i.started,
             })
@@ -137,9 +207,29 @@ impl Miner {
         for i in 0..settings.instances {
             let port = settings.api_base_port + i as u16;
             let args = command_line(settings, i, port);
-            self.spawn_instance(&settings.miner_exe, &args, i, port, Source::Cpu(i))?;
+            self.spawn_instance(&settings.miner_exe, &args, i, port, Source::Cpu(i), ApiKind::Cpuminer)?;
         }
         Ok(())
+    }
+
+    /// Starts XMRig (one process, Monero) on this PC's CPU.
+    pub fn start_xmr(&mut self, settings: &Settings) -> Result<(), String> {
+        if self.is_running() {
+            return Ok(());
+        }
+        let m = &settings.monero;
+        if !crate::settings::is_monero_address(m.address.trim()) {
+            return Err("Set a valid Monero address in Settings first.".into());
+        }
+        if !crate::settings::is_pool_host_port(m.pool.trim()) {
+            return Err(format!("Monero pool \"{}\" must be host:port", m.pool.trim()));
+        }
+        let exe = xmrig_path(settings);
+        if !exe.exists() {
+            return Err(format!("XMRig not found at {}", exe.display()));
+        }
+        let args = xmrig_command_line(settings);
+        self.spawn_instance(&exe.display().to_string(), &args, 0, m.api_port, Source::Cpu(0), ApiKind::Xmrig)
     }
 
     /// Starts the GPU miner (one process) from settings.
@@ -152,7 +242,7 @@ impl Miner {
             return Err(format!("GPU miner not found at {}", exe.display()));
         }
         let args = gpu_command_line(settings);
-        self.spawn_instance(&exe.display().to_string(), &args, 0, settings.gpu.api_port, Source::Gpu)
+        self.spawn_instance(&exe.display().to_string(), &args, 0, settings.gpu.api_port, Source::Gpu, ApiKind::Cpuminer)
     }
 
     fn spawn_instance(
@@ -162,6 +252,7 @@ impl Miner {
         index: u32,
         port: u16,
         source: Source,
+        kind: ApiKind,
     ) -> Result<(), String> {
         if let Some(b) = &self.book {
             if let Ok(mut b) = b.lock() {
@@ -192,6 +283,7 @@ impl Miner {
         self.instances.push(Instance {
             index,
             port,
+            kind,
             started: Instant::now(),
             log,
             child,
@@ -273,6 +365,28 @@ fn spawn_reader<R: Read + Send + 'static>(
             }
         }
     });
+}
+
+/// Stats from whichever API the instance speaks.
+pub fn query_stats(h: &InstanceHandle) -> Result<ApiSummary, String> {
+    match h.kind {
+        ApiKind::Cpuminer => query_summary(h.port),
+        ApiKind::Xmrig => query_xmrig(h.port),
+    }
+}
+
+/// GET /2/summary from XMRig's local HTTP API.
+pub fn query_xmrig(port: u16) -> Result<ApiSummary, String> {
+    let url = format!("http://127.0.0.1:{port}/2/summary");
+    let body = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .get(&url)
+        .call()
+        .map_err(|e| format!("XMRig API port {port}: {e}"))?
+        .into_string()
+        .map_err(|e| e.to_string())?;
+    parse::parse_xmrig_summary(&body).ok_or_else(|| "unexpected XMRig API reply".to_string())
 }
 
 /// Sends `summary` to a cpuminer API port and parses the reply.
@@ -432,6 +546,34 @@ mod tests {
         m.stop();
         std::thread::sleep(Duration::from_millis(500));
         assert!(!alive(pids[0]), "gpu-miner still running");
+    }
+
+    #[test]
+    fn xmrig_command_line_from_settings() {
+        let mut s = Settings::default();
+        s.monero.address = format!("4{}", "AbCd".repeat(23) + "ef");
+        let joined = xmrig_command_line(&s).join(" ");
+        assert!(joined.contains("-a rx/0"));
+        assert!(joined.contains("-o pool.supportxmr.com:443"));
+        assert!(joined.contains(&format!("-u {}", s.monero.address)));
+        assert!(joined.contains("-p desktop --rig-id desktop"));
+        assert!(joined.contains("--cpu-priority 0"));
+        assert!(joined.contains("--http-host 127.0.0.1 --http-port 4070"));
+        assert!(joined.contains("--tls"));
+        assert!(!joined.contains(" -t "), "XMRig picks threads by default");
+        s.monero.threads = 12;
+        s.monero.tls = false;
+        let joined = xmrig_command_line(&s).join(" ");
+        assert!(joined.ends_with("-t 12"));
+        assert!(!joined.contains("--tls"));
+    }
+
+    #[test]
+    fn xmrig_needs_an_address_before_starting() {
+        let mut m = Miner::default();
+        let err = m.start_xmr(&Settings::default()).unwrap_err();
+        assert!(err.contains("Monero address"));
+        assert!(!m.is_running());
     }
 
     #[test]

@@ -8,3 +8,6 @@ rustc-ice-*.txt
 
 # Local app settings (contain your address and SSH target)
 settings.json
+
+# Downloaded miners (XMRig), not part of the source
+/tools/

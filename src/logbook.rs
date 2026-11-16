@@ -78,7 +78,23 @@ pub fn strip_own_timestamp(text: &str) -> &str {
             .iter()
             .all(|&i| b[i].is_ascii_digit());
     if is_stamp {
-        text[21..].strip_prefix(' ').unwrap_or(&text[21..])
+        return text[21..].trim_start_matches(' ');
+    }
+    // XMRig: "[YYYY-MM-DD HH:MM:SS.mmm]"
+    let is_ms_stamp = b.len() >= 25
+        && b[0] == b'['
+        && b[20] == b'.'
+        && b[24] == b']'
+        && b[5] == b'-'
+        && b[8] == b'-'
+        && b[11] == b' '
+        && b[14] == b':'
+        && b[17] == b':'
+        && [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22, 23]
+            .iter()
+            .all(|&i| b[i].is_ascii_digit());
+    if is_ms_stamp {
+        text[25..].trim_start_matches(' ')
     } else {
         text
     }
@@ -280,6 +296,11 @@ mod tests {
         );
         assert_eq!(strip_own_timestamp("CPU affinity [!!!!....]"), "CPU affinity [!!!!....]");
         assert_eq!(strip_own_timestamp("[x] short"), "[x] short");
+        // XMRig's stamp with milliseconds.
+        assert_eq!(
+            strip_own_timestamp("[2026-11-16 17:00:00.123]  net      use pool pool.supportxmr.com:443"),
+            "net      use pool pool.supportxmr.com:443"
+        );
         // Stored form: continuation lines get a short indent.
         assert_eq!(clean("                      Hash rate   (68.72Mh/s)"), "  Hash rate   (68.72Mh/s)");
         assert_eq!(clean("[2026-11-14 00:44:41] API listening"), "API listening");

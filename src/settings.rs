@@ -61,6 +61,82 @@ impl Default for GpuSettings {
     }
 }
 
+/// What the CPU miners (this PC and the home server) mine. The GPU always
+/// mines Bitcoin: RandomX (Monero) is built for CPUs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Coin {
+    #[default]
+    Bitcoin,
+    Monero,
+}
+
+impl Coin {
+    pub fn label(self) -> &'static str {
+        match self {
+            Coin::Bitcoin => "Bitcoin",
+            Coin::Monero => "Monero",
+        }
+    }
+
+    /// The home server's systemd unit for this coin.
+    pub fn server_unit(self) -> &'static str {
+        match self {
+            Coin::Bitcoin => "cpuminer",
+            Coin::Monero => "xmrig",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MoneroSettings {
+    /// Path to xmrig.exe; empty = next to this app or in the project's tools\xmrig.
+    pub xmrig_exe: String,
+    /// Your Monero address (starts with 4 or 8).
+    pub address: String,
+    /// host:port of the pool (TLS).
+    pub pool: String,
+    pub tls: bool,
+    /// Rig name sent to the pool (password field).
+    pub worker: String,
+    /// CPU threads for XMRig on this PC; 0 = XMRig decides.
+    pub threads: u32,
+    /// XMRig HTTP API port on this PC.
+    pub api_port: u16,
+}
+
+impl Default for MoneroSettings {
+    fn default() -> Self {
+        Self {
+            xmrig_exe: String::new(),
+            address: String::new(),
+            pool: "pool.supportxmr.com:443".to_string(),
+            tls: true,
+            worker: "desktop".to_string(),
+            threads: 0,
+            api_port: 4070,
+        }
+    }
+}
+
+/// Standard (95 chars, starts with 4), subaddress (95, starts with 8) or
+/// integrated (106, starts with 4) Monero address, Base58 alphabet only.
+/// Strict on purpose: the address is written into a file on the server.
+pub fn is_monero_address(s: &str) -> bool {
+    const B58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let len_ok = matches!((s.len(), s.chars().next()), (95, Some('4' | '8')) | (106, Some('4')));
+    len_ok && s.chars().all(|c| B58.contains(c))
+}
+
+/// "host:port" with a plain hostname, for the Monero pool field.
+pub fn is_pool_host_port(s: &str) -> bool {
+    let Some((host, port)) = s.rsplit_once(':') else { return false };
+    !host.is_empty()
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && port.parse::<u16>().map(|p| p > 0).unwrap_or(false)
+}
+
 /// Choices for the idle slider, in minutes.
 pub const IDLE_STEPS: [u32; 12] = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120];
 
@@ -143,6 +219,9 @@ pub struct Settings {
     pub refresh_secs: u64,
     pub gpu: GpuSettings,
     pub idle: IdleSettings,
+    /// Coin for the CPU miners here and on the home server.
+    pub coin: Coin,
+    pub monero: MoneroSettings,
 }
 
 impl Default for Settings {
@@ -163,6 +242,8 @@ impl Default for Settings {
             refresh_secs: 5,
             gpu: GpuSettings::default(),
             idle: IdleSettings::default(),
+            coin: Coin::Bitcoin,
+            monero: MoneroSettings::default(),
         }
     }
 }
@@ -178,10 +259,13 @@ impl Settings {
     /// Why Quick start can't run with these settings (None = it can).
     /// Only checks that the miner path and the address are filled in.
     pub fn quick_start_hint(&self) -> Option<&'static str> {
-        if self.miner_exe.trim().is_empty() {
+        if self.coin == Coin::Bitcoin && self.miner_exe.trim().is_empty() {
             Some("Set the miner executable in Settings first.")
         } else if self.address.trim().is_empty() {
+            // The GPU mines Bitcoin whatever the coin.
             Some("Set the Bitcoin address in Settings first.")
+        } else if self.coin == Coin::Monero && !is_monero_address(self.monero.address.trim()) {
+            Some("Set your Monero address in Settings first.")
         } else {
             None
         }
@@ -301,6 +385,60 @@ mod tests {
         assert_eq!(s.affinity_mask(1), 0x00F0);
         assert_eq!(s.affinity_mask(2), 0x0F00);
         assert_eq!(s.affinity_mask(3), 0xF000);
+    }
+
+    /// A synthetic, syntactically valid 95-char address (not a wallet).
+    fn xmr() -> String {
+        format!("4{}", "AbCd".repeat(23) + "ef")
+    }
+
+    #[test]
+    fn monero_address_check() {
+        let x = xmr();
+        assert_eq!(x.len(), 95);
+        assert!(is_monero_address(&x));
+        assert!(is_monero_address(&format!("8{}", &x[1..])), "subaddress");
+        assert!(!is_monero_address(&format!("3{}", &x[1..])), "bad first char");
+        assert!(!is_monero_address(&x[..94]), "too short");
+        assert!(!is_monero_address(&format!("{}0", &x[..94])), "0 is not Base58");
+        assert!(!is_monero_address(&format!("{}; rm", &x[..91])), "shell characters");
+        assert!(!is_monero_address(""));
+    }
+
+    #[test]
+    fn pool_field_check() {
+        assert!(is_pool_host_port("pool.supportxmr.com:443"));
+        assert!(!is_pool_host_port("pool.supportxmr.com"));
+        assert!(!is_pool_host_port("evil.com:443;reboot"));
+        assert!(!is_pool_host_port(":443"));
+        assert!(!is_pool_host_port("x:0"));
+    }
+
+    #[test]
+    fn coin_round_trip_and_defaults() {
+        let path = temp_file("coin");
+        let mut s = Settings::default();
+        assert_eq!(s.coin, Coin::Bitcoin);
+        s.coin = Coin::Monero;
+        s.monero.address = xmr();
+        save_to(&path, &s).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"coin\": \"monero\""));
+        assert_eq!(load_from(&path).unwrap(), s);
+        assert_eq!(Coin::Monero.server_unit(), "xmrig");
+        assert_eq!(Coin::Bitcoin.server_unit(), "cpuminer");
+    }
+
+    #[test]
+    fn quick_start_on_monero_needs_a_monero_address() {
+        let mut s = Settings::default();
+        s.coin = Coin::Monero;
+        assert!(s.quick_start_hint().unwrap().contains("Monero address"));
+        s.monero.address = xmr();
+        assert_eq!(s.quick_start_hint(), None);
+        // cpuminer's path does not matter on Monero.
+        s.miner_exe.clear();
+        assert_eq!(s.quick_start_hint(), None);
     }
 
     #[test]

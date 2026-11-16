@@ -136,6 +136,53 @@ pub fn fetch_network() -> Result<Network, String> {
     Ok(net)
 }
 
+/// Monero network numbers for the earnings estimate.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MoneroNet {
+    /// H/s
+    pub hashrate: Option<f64>,
+    pub difficulty: Option<f64>,
+    pub height: Option<u64>,
+    /// Last block reward in XMR.
+    pub reward_xmr: Option<f64>,
+    pub eur_per_xmr: Option<f64>,
+}
+
+/// moneroblocks.info /api/get_stats ("last_reward" is in atomic units, 1e-12 XMR).
+pub fn parse_monero_stats(v: &Value, net: &mut MoneroNet) {
+    net.hashrate = v.get("hashrate").and_then(json_f64);
+    net.difficulty = v.get("difficulty").and_then(json_f64);
+    net.height = v.get("height").and_then(|x| x.as_u64());
+    net.reward_xmr = v.get("last_reward").and_then(json_f64).map(|a| a / 1e12);
+}
+
+/// CoinGecko simple price: {"monero":{"eur":454.49}}.
+pub fn parse_xmr_eur(v: &Value) -> Option<f64> {
+    v.get("monero")?.get("eur").and_then(json_f64)
+}
+
+pub fn fetch_monero() -> Result<MoneroNet, String> {
+    let mut net = MoneroNet::default();
+    if let Some(v) = remote::get_json("https://moneroblocks.info/api/get_stats")? {
+        parse_monero_stats(&v, &mut net);
+    }
+    if let Some(v) = remote::get_json("https://api.coingecko.com/api/v3/simple/price?ids=monero&vs_currencies=eur")? {
+        net.eur_per_xmr = parse_xmr_eur(&v);
+    }
+    Ok(net)
+}
+
+/// Expected XMR per day for a hashrate (H/s): your share of the network
+/// times 720 blocks a day times the block reward. Same for pool and solo
+/// on average (a pool takes its fee from this).
+pub fn xmr_per_day(hashrate: f64, net: &MoneroNet) -> Option<f64> {
+    let (nh, reward) = (net.hashrate?, net.reward_xmr?);
+    if nh <= 0.0 || hashrate <= 0.0 {
+        return None;
+    }
+    Some(hashrate / nh * 720.0 * reward)
+}
+
 /// Odds shown in the UI for one hashrate at the network difficulty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Odds {
@@ -185,6 +232,27 @@ mod tests {
         assert_eq!(u.best_share, Some(12345.6));
         assert_eq!(u.workers.len(), 2);
         assert_eq!(u.workers[1].hashrate_1m, Some(69e6));
+    }
+
+    #[test]
+    fn monero_fixtures_and_earnings() {
+        // Captured 2026-11-16.
+        let stats: Value = serde_json::from_str(
+            r#"{"difficulty":862330176135,"height":3807757,"hashrate":7186084801.125,"total_emission":"18831829362793084111","last_reward":678760166873,"last_timestamp":1794844042}"#,
+        )
+        .unwrap();
+        let price: Value = serde_json::from_str(r#"{"monero":{"eur":454.49},"bitcoin":{"eur":58616}}"#).unwrap();
+        let mut net = MoneroNet::default();
+        parse_monero_stats(&stats, &mut net);
+        net.eur_per_xmr = parse_xmr_eur(&price);
+        assert_eq!(net.height, Some(3807757));
+        assert!((net.reward_xmr.unwrap() - 0.678760166873).abs() < 1e-12);
+        assert_eq!(net.eur_per_xmr, Some(454.49));
+        // 20 kH/s: 20e3 / 7.186e9 * 720 * 0.6788 = about 0.00136 XMR a day.
+        let d = xmr_per_day(20_000.0, &net).unwrap();
+        assert!((d - 0.00136).abs() < 0.00001, "got {d}");
+        assert!(xmr_per_day(0.0, &net).is_none());
+        assert!(xmr_per_day(1.0, &MoneroNet::default()).is_none());
     }
 
     #[test]

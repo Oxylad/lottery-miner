@@ -113,3 +113,26 @@ and `assets/logo.svg` (icon plus wordmark, for dark backgrounds) are the
 sources. `assets/make-icons.ps1` renders them with headless Edge and packs
 `assets/lottery-miner.ico` (16-256 px). `build.rs` embeds it as icon
 resource #1 in both exes; the window and the tray icon load it from there.
+
+## Monero (CPUs)
+
+The header switch **CPUs: Bitcoin | Monero** moves the CPU miners on this PC
+and on the home server to Monero (RandomX, XMRig) or back. The GPU always
+mines Bitcoin; RandomX is a CPU algorithm. Monero goes to a normal pool
+(default `pool.supportxmr.com:443`, TLS): same expected value as solo,
+steady small payouts. Set your Monero address in the Monero card first.
+
+- This PC: XMRig from `tools\xmrig\xmrig.exe` (or next to the app, or the
+  path in Settings), idle priority, no window, stats from its local HTTP API
+  (127.0.0.1:4070, `/2/summary`). `tools/` is not in git; get XMRig 6.26.0
+  from github.com/xmrig/xmrig and check it against the release's SHA256SUMS.
+  Defender flags XMRig (Trojan:Win64/HashvaultMiner.A, threat ID 2147978346);
+  it needs an exclusion and an allow, like cpuminer.
+- Home server: `xmrig.service` next to `cpuminer.service` (same hardening,
+  MemoryMax=3G for the RandomX dataset). Switching runs
+  `disable --now` on one unit and `enable --now` on the other, and for Monero
+  first writes `/etc/default/xmrig` (pool, validated address, rig name).
+  Nothing else on the server is touched.
+- The Monero card estimates XMR and EUR per day/year from your hashrate,
+  the network hashrate and block reward (moneroblocks.info) and the XMR price
+  (CoinGecko).

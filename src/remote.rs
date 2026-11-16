@@ -6,17 +6,21 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::parse::{self, LogState};
-use crate::settings::SshTarget;
+use crate::settings::{Coin, MoneroSettings, SshTarget, is_monero_address, is_pool_host_port};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Remote read-only probe. One ssh round trip; the 10 s energy gap is inside.
 /// Only fixed commands; no user text is interpolated.
-const PROBE: &str = "systemctl is-active cpuminer; echo ---SHOW; systemctl show cpuminer -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u cpuminer -o short-unix -n 300; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
+/// Reports cpuminer and xmrig, then details for the selected unit: xmrig if it is
+/// enabled or running (the app switched the server to Monero), else cpuminer.
+const PROBE: &str = "systemctl is-active cpuminer; echo ---XMRIG; systemctl is-active xmrig; U=cpuminer; systemctl is-enabled --quiet xmrig && U=xmrig; systemctl is-active --quiet xmrig && U=xmrig; echo ---UNIT; echo $U; echo ---SHOW; systemctl show $U -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u $U -o short-unix -n 300; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OxyhomeStats {
     pub service_active: bool,
+    /// The miner unit the server is set to: "cpuminer" (Bitcoin) or "xmrig" (Monero).
+    pub unit: String,
     /// False when systemd reports LoadState=not-found for cpuminer.service.
     pub unit_found: bool,
     pub active_since: Option<String>,
@@ -160,11 +164,25 @@ pub fn parse_probe(text: &str) -> OxyhomeStats {
             parts.entry(section).or_default().push(line);
         }
     }
-    stats.service_active = parts
-        .get("ACTIVE")
+    let first_is_active = |key: &str| {
+        parts
+            .get(key)
+            .and_then(|v| v.first())
+            .map(|s| s.trim() == "active")
+            .unwrap_or(false)
+    };
+    stats.unit = parts
+        .get("UNIT")
         .and_then(|v| v.first())
-        .map(|s| s.trim() == "active")
-        .unwrap_or(false);
+        .map(|s| s.trim())
+        .filter(|s| *s == "xmrig")
+        .unwrap_or("cpuminer")
+        .to_string();
+    stats.service_active = if stats.unit == "xmrig" {
+        first_is_active("XMRIG")
+    } else {
+        first_is_active("ACTIVE")
+    };
     for line in parts.get("SHOW").into_iter().flatten() {
         if let Some(v) = line.strip_prefix("ActiveEnterTimestamp=") {
             stats.active_since = Some(v.trim().to_string());
@@ -197,9 +215,41 @@ pub fn parse_probe(text: &str) -> OxyhomeStats {
 }
 
 /// systemctl start|stop|restart cpuminer, and nothing else.
-pub fn control(target: &SshTarget, action: ServiceAction) -> Result<(), String> {
-    let remote = format!("sudo -n systemctl {} cpuminer", action.word());
+/// systemctl start|stop|restart of the miner unit for `coin`, and nothing else.
+pub fn control(target: &SshTarget, action: ServiceAction, coin: Coin) -> Result<(), String> {
+    let remote = format!("sudo -n systemctl {} {}", action.word(), coin.server_unit());
     run_ssh(target, &remote).map(|_| ())
+}
+
+/// The remote commands that switch the server's miner to `coin`. For Monero
+/// it first writes /etc/default/xmrig (pool, address, rig name); both values
+/// are validated so nothing but Base58 and host:port reaches the shell.
+pub fn switch_script(coin: Coin, monero: &MoneroSettings) -> Result<String, String> {
+    match coin {
+        Coin::Bitcoin => Ok(
+            "sudo -n systemctl disable --now xmrig && sudo -n systemctl enable --now cpuminer".into(),
+        ),
+        Coin::Monero => {
+            let addr = monero.address.trim();
+            let pool = monero.pool.trim();
+            if !is_monero_address(addr) {
+                return Err("Set a valid Monero address first.".into());
+            }
+            if !is_pool_host_port(pool) {
+                return Err(format!("Monero pool \"{pool}\" must be host:port"));
+            }
+            Ok(format!(
+                "printf 'XMRIG_POOL=%s\\nXMRIG_USER=%s\\nXMRIG_RIG=oxyhome\\n' {pool} {addr} | sudo -n tee /etc/default/xmrig >/dev/null && sudo -n systemctl disable --now cpuminer && sudo -n systemctl enable --now xmrig"
+            ))
+        }
+    }
+}
+
+/// Switches the home server between cpuminer (Bitcoin) and xmrig (Monero),
+/// including which one starts at boot.
+pub fn switch_coin(target: &SshTarget, coin: Coin, monero: &MoneroSettings) -> Result<(), String> {
+    let script = switch_script(coin, monero)?;
+    run_ssh(target, &script).map(|_| ())
 }
 
 #[cfg(test)]
@@ -231,6 +281,38 @@ Package id 0:  +61.0°C  (high = +86.0°C, crit = +100.0°C)
         assert_eq!(s.log.accepted, 9);
         assert_eq!(s.temp_c, Some(61.0));
         assert_eq!(s.watts, Some(82.0));
+    }
+
+    #[test]
+    fn probe_reports_xmrig_when_selected() {
+        let out = "inactive\n---XMRIG\nactive\n---UNIT\nxmrig\n---SHOW\nLoadState=loaded\nNRestarts=0\n---LOG\n\
+1794844000.100000 oxyhome xmrig[2201]: [2026-11-16 17:01:00.000]  miner    speed 10s/60s/15m 3456.7 3400.1 n/a H/s max 3500.0 H/s\n\
+1794844060.100000 oxyhome xmrig[2201]: [2026-11-16 17:02:00.000]  cpu      accepted (2/0) diff 50000 (60 ms)\n\
+---TEMP\n---ENERGY\n";
+        let s = parse_probe(out);
+        assert_eq!(s.unit, "xmrig");
+        assert!(s.service_active, "uses xmrig's state, not cpuminer's");
+        assert_eq!(s.log.hashrate, Some(3456.7));
+        assert_eq!(s.log.accepted, 2);
+        // Old-style output (no UNIT section) means cpuminer.
+        assert_eq!(parse_probe(PROBE_OUT).unit, "cpuminer");
+        assert!(parse_probe(PROBE_OUT).service_active);
+    }
+
+    #[test]
+    fn switch_scripts_only_touch_the_two_miner_units() {
+        let mut m = MoneroSettings::default();
+        let btc = switch_script(Coin::Bitcoin, &m).unwrap();
+        assert_eq!(btc, "sudo -n systemctl disable --now xmrig && sudo -n systemctl enable --now cpuminer");
+        assert!(switch_script(Coin::Monero, &m).is_err(), "no address yet");
+        m.address = format!("4{}", "AbCd".repeat(23) + "ef");
+        let xmr = switch_script(Coin::Monero, &m).unwrap();
+        assert!(xmr.contains("XMRIG_POOL=%s"));
+        assert!(xmr.contains(&format!("pool.supportxmr.com:443 {}", m.address)));
+        assert!(xmr.contains("sudo -n tee /etc/default/xmrig"));
+        assert!(xmr.ends_with("sudo -n systemctl disable --now cpuminer && sudo -n systemctl enable --now xmrig"));
+        m.pool = "evil.example:443;reboot".into();
+        assert!(switch_script(Coin::Monero, &m).is_err(), "pool is validated");
     }
 
     #[test]

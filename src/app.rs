@@ -7,9 +7,9 @@ use gpui::{AppContext, AsyncApp, Context, Entity, WeakEntity};
 
 use crate::input::TextInput;
 use crate::miner::{self, InstanceHandle, Miner};
-use crate::network::{self, Network, PoolUser};
+use crate::network::{self, MoneroNet, Network, PoolUser};
 use crate::remote::{self, OxyhomeStats, ServiceAction};
-use crate::settings::{self, IdleAction, Settings};
+use crate::settings::{self, Coin, IdleAction, Settings};
 use crate::logbook::{self, Filter, SharedLog, Source};
 use crate::win;
 
@@ -56,6 +56,9 @@ pub struct Dashboard {
     idle_awake: bool,
     pub pool: Option<Result<Option<PoolUser>, String>>,
     pub network: Option<Result<Network, String>>,
+    pub xmr_net: Option<Result<MoneroNet, String>>,
+    /// Coin of the CPU miners that are running (or last ran).
+    pub cpu_coin: Coin,
     pub oxyhome: Option<Result<OxyhomeStats, String>>,
     pub oxyhome_busy: bool,
     pub oxyhome_due: Instant,
@@ -88,6 +91,9 @@ pub struct Form {
     pub ssh_key: Entity<TextInput>,
     pub gpu_worker: Entity<TextInput>,
     pub gpu_device: Entity<TextInput>,
+    pub xmr_address: Entity<TextInput>,
+    pub xmr_pool: Entity<TextInput>,
+    pub xmrig_exe: Entity<TextInput>,
 }
 
 impl Form {
@@ -110,6 +116,9 @@ impl Form {
             ssh_key: field(&s.oxyhome.key_file, "~/.ssh/id_ed25519"),
             gpu_worker: field(&s.gpu.worker, "desktopgpu"),
             gpu_device: field(&s.gpu.device, "first discrete GPU"),
+            xmr_address: field(&s.monero.address, "4... or 8... (95 characters)"),
+            xmr_pool: field(&s.monero.pool, "pool.supportxmr.com:443"),
+            xmrig_exe: field(&s.monero.xmrig_exe, "automatic (tools/xmrig/xmrig.exe)"),
         }
     }
 
@@ -126,6 +135,9 @@ impl Form {
             (&self.ssh_key, s.oxyhome.key_file.as_str()),
             (&self.gpu_worker, s.gpu.worker.as_str()),
             (&self.gpu_device, s.gpu.device.as_str()),
+            (&self.xmr_address, s.monero.address.as_str()),
+            (&self.xmr_pool, s.monero.pool.as_str()),
+            (&self.xmrig_exe, s.monero.xmrig_exe.as_str()),
         ] {
             input.update(cx, |i, cx| i.set_text(text, cx));
         }
@@ -164,6 +176,8 @@ impl Dashboard {
             idle_awake: false,
             pool: None,
             network: None,
+            xmr_net: None,
+            cpu_coin: Coin::Bitcoin,
             oxyhome: None,
             oxyhome_busy: false,
             oxyhome_due: Instant::now(),
@@ -285,6 +299,7 @@ impl Dashboard {
         (self.idle_cpu && self.miner.is_running()) || (self.idle_gpu && self.gpu_miner.is_running())
     }
 
+    /// This PC's CPU miners, in their own coin's unit (see cpu_coin).
     pub fn cpu_hashrate(&self) -> f64 {
         self.local.iter().filter_map(|i| i.hashrate).sum()
     }
@@ -293,16 +308,96 @@ impl Dashboard {
         self.gpu.as_ref().and_then(|g| g.hashrate).unwrap_or(0.0)
     }
 
-    /// This PC: CPU instances plus the GPU miner.
+    /// This PC on Bitcoin: the GPU, plus the CPU miners when they mine Bitcoin.
     pub fn total_hashrate(&self) -> f64 {
-        self.cpu_hashrate() + self.gpu_hashrate()
+        let cpu = if self.cpu_coin == Coin::Bitcoin { self.cpu_hashrate() } else { 0.0 };
+        cpu + self.gpu_hashrate()
     }
 
-    pub fn oxyhome_hashrate(&self) -> Option<f64> {
+    /// This PC on Monero (H/s of RandomX): the CPU miners when they mine Monero.
+    pub fn xmr_local_hashrate(&self) -> f64 {
+        if self.cpu_coin == Coin::Monero { self.cpu_hashrate() } else { 0.0 }
+    }
+
+    /// What the home server is set to mine, from its last probe.
+    pub fn oxyhome_coin(&self) -> Coin {
         match &self.oxyhome {
-            Some(Ok(s)) if s.service_active => s.log.hashrate,
+            Some(Ok(s)) if s.unit == "xmrig" => Coin::Monero,
+            Some(Ok(_)) => Coin::Bitcoin,
+            _ => self.settings.coin,
+        }
+    }
+
+    fn oxyhome_rate(&self, coin: Coin) -> Option<f64> {
+        match &self.oxyhome {
+            Some(Ok(s)) if s.service_active && self.oxyhome_coin() == coin => s.log.hashrate,
             _ => None,
         }
+    }
+
+    /// Home server's Bitcoin hashrate (None while it mines Monero).
+    pub fn oxyhome_hashrate(&self) -> Option<f64> {
+        self.oxyhome_rate(Coin::Bitcoin)
+    }
+
+    /// Home server's Monero hashrate (None while it mines Bitcoin).
+    pub fn oxyhome_xmr_hashrate(&self) -> Option<f64> {
+        self.oxyhome_rate(Coin::Monero)
+    }
+
+    /// Switches the CPU miners here and on the home server to `coin`. A
+    /// running CPU miner restarts on the new coin; the GPU stays on Bitcoin.
+    pub fn set_coin(&mut self, coin: Coin, cx: &mut Context<Self>) {
+        if coin == Coin::Monero && !crate::settings::is_monero_address(self.settings.monero.address.trim()) {
+            self.message = Some("Enter your Monero address in Settings and Save before switching to Monero.".into());
+            return;
+        }
+        let changed = self.settings.coin != coin;
+        self.settings.coin = coin;
+        self.save_settings();
+        if changed {
+            self.log(&format!("switching CPU mining to {}", coin.label()));
+            if self.miner.is_running() {
+                let was_idle = self.idle_cpu;
+                self.stop_mining();
+                self.start_mining();
+                self.idle_cpu = was_idle && self.miner.is_running();
+            }
+        }
+        // The server: switch if it is not on this coin yet (also retries).
+        if self.oxyhome_coin() != coin || changed {
+            self.oxyhome_switch(coin, cx);
+        }
+    }
+
+    fn oxyhome_switch(&mut self, coin: Coin, cx: &mut Context<Self>) {
+        if self.oxyhome_busy {
+            return;
+        }
+        self.oxyhome_busy = true;
+        let target = self.settings.oxyhome.clone();
+        let monero = self.settings.monero.clone();
+        self.log(&format!("oxyhome: switching to {} ({})", coin.label(), coin.server_unit()));
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { remote::switch_coin(&target, coin, &monero) })
+                .await;
+            let _ = this.update(cx, |d, cx| {
+                d.oxyhome_busy = false;
+                match result {
+                    Ok(()) => d.log(&format!("oxyhome: now mining {}", coin.label())),
+                    Err(e) => {
+                        d.log(&format!("oxyhome: switch to {} failed: {e}", coin.label()));
+                        d.message = Some(format!("oxyhome: {e}"));
+                    }
+                }
+                d.oxyhome_due = Instant::now();
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Network difficulty from mempool.space, falling back to the miner log.
@@ -324,12 +419,22 @@ impl Dashboard {
         n
     }
 
+    /// Starts the CPU miners on the selected coin: cpuminer instances for
+    /// Bitcoin, one XMRig process for Monero.
     pub fn start_mining(&mut self) {
-        match self.miner.start(&self.settings) {
-            Ok(()) => self.message = None,
+        let coin = self.settings.coin;
+        let result = match coin {
+            Coin::Bitcoin => self.miner.start(&self.settings),
+            Coin::Monero => self.miner.start_xmr(&self.settings),
+        };
+        match result {
+            Ok(()) => {
+                self.cpu_coin = coin;
+                self.message = None;
+            }
             Err(e) => {
                 self.miner.stop();
-                self.log(&format!("CPU mining failed to start: {e}"));
+                self.log(&format!("CPU mining ({}) failed to start: {e}", coin.label()));
                 self.message = Some(e);
             }
         }
@@ -432,6 +537,32 @@ impl Dashboard {
         });
     }
 
+    /// Reads the Monero text fields into settings and saves them.
+    pub fn apply_monero_form(&mut self, cx: &mut Context<Self>) {
+        let address = self.form.xmr_address.read(cx).text().trim().to_string();
+        let pool = self.form.xmr_pool.read(cx).text().trim().to_string();
+        let exe = self.form.xmrig_exe.read(cx).text().trim().to_string();
+        if !address.is_empty() && !settings::is_monero_address(&address) {
+            self.message = Some("That is not a valid Monero address (95 or 106 characters, starts with 4 or 8).".into());
+            return;
+        }
+        if !settings::is_pool_host_port(&pool) {
+            self.message = Some("Monero pool must be host:port, for example pool.supportxmr.com:443.".into());
+            return;
+        }
+        let m = &mut self.settings.monero;
+        let changed = m.address != address || m.pool != pool;
+        m.address = address;
+        m.pool = pool;
+        m.xmrig_exe = exe;
+        self.save_settings();
+        self.message = Some(if changed && self.settings.coin == Coin::Monero {
+            "Saved. Switch to Bitcoin and back to Monero to apply it on running miners and oxyhome.".into()
+        } else {
+            "Saved.".into()
+        });
+    }
+
     /// Reads the GPU text fields into settings and saves them.
     pub fn apply_gpu_form(&mut self, cx: &mut Context<Self>) {
         let worker = self.form.gpu_worker.read(cx).text().trim().to_string();
@@ -526,18 +657,20 @@ impl Dashboard {
         }
         self.oxyhome_busy = true;
         let target = self.settings.oxyhome.clone();
+        let coin = self.oxyhome_coin();
+        let unit = coin.server_unit();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let what = format!("{:?}", action).to_lowercase();
             let result = cx
                 .background_executor()
-                .spawn(async move { remote::control(&target, action) })
+                .spawn(async move { remote::control(&target, action, coin) })
                 .await;
             let _ = this.update(cx, |d, cx| {
                 d.oxyhome_busy = false;
                 match result {
-                    Ok(()) => d.log(&format!("oxyhome: systemctl {what} cpuminer done")),
+                    Ok(()) => d.log(&format!("oxyhome: systemctl {what} {unit} done")),
                     Err(e) => {
-                        d.log(&format!("oxyhome: systemctl {what} cpuminer failed: {e}"));
+                        d.log(&format!("oxyhome: systemctl {what} {unit} failed: {e}"));
                         d.message = Some(format!("oxyhome: {e}"));
                     }
                 }
@@ -625,15 +758,16 @@ impl Dashboard {
                     let weak = this.clone();
                     let mut acx = cx.clone();
                     cx.spawn(async move |_| {
-                        let (pool, net) = acx
+                        let (pool, net, xmr) = acx
                             .background_executor()
                             .spawn(async move {
-                                (network::fetch_pool_user(&address), network::fetch_network())
+                                (network::fetch_pool_user(&address), network::fetch_network(), network::fetch_monero())
                             })
                             .await;
                         let _ = weak.update(&mut acx, |d, cx| {
                             d.pool = Some(pool);
                             d.network = Some(net);
+                            d.xmr_net = Some(xmr);
                             cx.notify();
                         });
                     })
@@ -685,7 +819,7 @@ fn collect_local(handles: Vec<InstanceHandle>) -> Vec<InstanceView> {
                 device: None,
                 last_error: log.last_error.clone(),
             };
-            match miner::query_summary(h.port) {
+            match miner::query_stats(&h) {
                 Ok(s) => {
                     if s.hashrate > 0.0 {
                         v.hashrate = Some(s.hashrate);

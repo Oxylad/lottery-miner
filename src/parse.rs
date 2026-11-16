@@ -62,6 +62,9 @@ impl LogState {
     /// Feeds one stdout/stderr line into the state.
     pub fn feed(&mut self, raw: &str) {
         let line = strip_timestamp(raw);
+        if self.feed_xmrig(line) {
+            return;
+        }
         if line.starts_with("fatal:")
             || line.starts_with("GPU init failed")
             || line.starts_with("selftest FAILED")
@@ -114,6 +117,78 @@ impl LogState {
             }
         }
     }
+}
+
+impl LogState {
+    /// XMRig lines ("net      new job from ...", "miner    speed 10s/60s/15m ...",
+    /// "cpu      accepted (3/0) diff ..."). Returns true if the line was one.
+    fn feed_xmrig(&mut self, line: &str) -> bool {
+        if let Some(i) = line.find("speed 10s/60s/15m") {
+            // First number after the label is the 10 s average in H/s ("n/a" early on).
+            let rest = &line[i + "speed 10s/60s/15m".len()..];
+            if let Some(v) = rest.split_whitespace().next().and_then(|t| t.parse::<f64>().ok()) {
+                self.hashrate = Some(v);
+            }
+            return true;
+        }
+        if let Some(i) = line.find(" accepted (").or_else(|| line.find(" rejected (")) {
+            let rest = &line[i..];
+            if let (Some(a), Some(b)) = (rest.find('('), rest.find(')')) {
+                if let Some((acc, rej)) = rest[a + 1..b].split_once('/') {
+                    if let (Ok(acc), Ok(rej)) = (acc.trim().parse::<u64>(), rej.trim().parse::<u64>()) {
+                        self.accepted = acc;
+                        self.submitted = acc + rej;
+                    }
+                }
+            }
+            return true;
+        }
+        if line.contains("new job from ") {
+            self.connected = true;
+            self.last_error = None;
+            if let Some(d) = field_after(line, "diff ") {
+                self.difficulty = d.parse().ok();
+            }
+            if let Some(h) = field_after(line, "height ") {
+                self.block = h.parse().ok();
+            }
+            return true;
+        }
+        if line.contains("use pool ") {
+            self.connected = true;
+            self.last_error = None;
+            return true;
+        }
+        if line.contains(" error: ") && line.starts_with("net") {
+            self.last_error = Some(line.split_whitespace().collect::<Vec<_>>().join(" "));
+            return true;
+        }
+        false
+    }
+}
+
+/// XMRig's HTTP API (GET /2/summary) reply: hashrate.total = [10s, 60s, 15m]
+/// (null until measured), results.shares_good / shares_total, uptime.
+pub fn parse_xmrig_summary(json: &str) -> Option<ApiSummary> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let totals = v.get("hashrate")?.get("total")?.as_array()?;
+    let hashrate = totals.iter().find_map(|x| x.as_f64()).unwrap_or(0.0);
+    let results = v.get("results");
+    let good = results.and_then(|r| r.get("shares_good")).and_then(|x| x.as_u64()).unwrap_or(0);
+    let total = results.and_then(|r| r.get("shares_total")).and_then(|x| x.as_u64()).unwrap_or(good);
+    Some(ApiSummary {
+        hashrate,
+        accepted: good,
+        rejected: total.saturating_sub(good),
+        difficulty: results.and_then(|r| r.get("diff_current")).and_then(|x| x.as_f64()),
+        uptime_secs: v.get("uptime").and_then(|x| x.as_u64()),
+        temp: None,
+        device: v
+            .get("cpu")
+            .and_then(|c| c.get("brand"))
+            .and_then(|b| b.as_str())
+            .map(|s| s.trim().to_string()),
+    })
 }
 
 fn field_after<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -269,6 +344,50 @@ mod tests {
         assert_eq!(s.difficulty, Some(148364561003867.41));
         assert_eq!(s.uptime_secs, Some(41));
         assert!(parse_api_summary("").is_none());
+    }
+
+    #[test]
+    fn xmrig_log_lines() {
+        // Format of XMRig 6.x log lines (--no-color).
+        let mut st = LogState::default();
+        for l in [
+            "[2026-11-16 17:00:00.123]  net      use pool pool.supportxmr.com:443 TLSv1.3 141.95.72.59",
+            "[2026-11-16 17:00:00.456]  net      new job from pool.supportxmr.com:443 diff 120001 algo rx/0 height 3807757",
+            "[2026-11-16 17:01:00.000]  miner    speed 10s/60s/15m 16234.5 16100.0 n/a H/s max 16300.0 H/s",
+            "[2026-11-16 17:02:00.000]  cpu      accepted (3/1) diff 120001 (45 ms)",
+        ] {
+            st.feed(l);
+        }
+        assert!(st.connected);
+        assert_eq!(st.block, Some(3807757));
+        assert_eq!(st.difficulty, Some(120001.0));
+        assert_eq!(st.hashrate, Some(16234.5));
+        assert_eq!(st.accepted, 3);
+        assert_eq!(st.rejected(), 1);
+        // Speed not measured yet leaves the old value alone.
+        st.feed("[2026-11-16 17:03:00.000]  miner    speed 10s/60s/15m n/a n/a n/a H/s max n/a H/s");
+        assert_eq!(st.hashrate, Some(16234.5));
+        st.feed("[2026-11-16 17:04:00.000]  net      pool.supportxmr.com:443 error: \"connect error: timed out\"");
+        assert!(st.last_error.unwrap().contains("connect error"));
+    }
+
+    #[test]
+    fn xmrig_api_summary() {
+        // Trimmed GET /2/summary reply from XMRig 6.x.
+        let json = r#"{"id":"abc","worker_id":"desktop","uptime":125,"version":"6.26.0",
+            "cpu":{"brand":"AMD Ryzen 7 7700X 8-Core Processor            "},
+            "results":{"diff_current":120001,"shares_good":7,"shares_total":8,"avg_time":17},
+            "hashrate":{"total":[16234.5,16100.0,null],"highest":16300.0}}"#;
+        let s = parse_xmrig_summary(json).unwrap();
+        assert_eq!(s.hashrate, 16234.5);
+        assert_eq!(s.accepted, 7);
+        assert_eq!(s.rejected, 1);
+        assert_eq!(s.uptime_secs, Some(125));
+        assert_eq!(s.device.as_deref(), Some("AMD Ryzen 7 7700X 8-Core Processor"));
+        // Before the first measurement every total is null.
+        let early = r#"{"uptime":3,"hashrate":{"total":[null,null,null]},"results":{"shares_good":0,"shares_total":0}}"#;
+        assert_eq!(parse_xmrig_summary(early).unwrap().hashrate, 0.0);
+        assert!(parse_xmrig_summary("not json").is_none());
     }
 
     #[test]
