@@ -552,10 +552,10 @@ impl Render for TextInput {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(rgb(0x1b1d22))
+                    .bg(rgb(0x111318))
                     .border_1()
-                    .border_color(rgb(if focused { 0x4a7bd0 } else { 0x343844 }))
-                    .text_color(rgb(0xe6e6e6))
+                    .border_color(rgb(if focused { 0xf7931a } else { 0x262b36 }))
+                    .text_color(rgb(0xe6e8ec))
                     .child(TextElement { input: cx.entity() }),
             )
     }

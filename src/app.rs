@@ -79,6 +79,7 @@ pub struct Dashboard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Dashboard,
+    Settings,
     Logs,
 }
 
