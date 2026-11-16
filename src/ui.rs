@@ -537,6 +537,27 @@ impl Render for Dashboard {
                 "Pool mining: steady small payouts, expected value about the same as solo. The pool's fee and XMRig's 1% donation come off the top.",
                 MUTED,
             ))
+            .child(stepper(
+                "XMRig threads (this PC)".into(),
+                match self.settings.monero.threads {
+                    0 => "Auto".to_string(),
+                    n => n.to_string(),
+                },
+                cx,
+                |d, _| {
+                    // Auto (0) sits below 1.
+                    d.settings.monero.threads = d.settings.monero.threads.saturating_sub(1);
+                    d.save_settings();
+                },
+                |d, _| {
+                    d.settings.monero.threads = (d.settings.monero.threads + 1).min(max_cpu_threads());
+                    d.save_settings();
+                },
+            ))
+            .child(note(
+                "Auto lets XMRig use every thread. Fewer leaves room for your apps while you use the PC. Applies the next time XMRig starts (stop and start CPU mining).",
+                MUTED,
+            ))
             .child(field("Monero address", f.xmr_address.clone(), "Payouts go here. Needed before switching to Monero."))
             .child(field("Monero pool (TLS)", f.xmr_pool.clone(), "host:port; oxyhome uses the same pool."))
             .child(field("XMRig executable", f.xmrig_exe.clone(), "Empty: tools\\xmrig\\xmrig.exe in the project, or next to this app."))
@@ -925,6 +946,11 @@ impl Render for Dashboard {
                 .child(column().child(odds_card).child(monero).child(pool).child(set)),
         )
     }
+}
+
+/// Logical CPUs on this PC (upper limit for XMRig's threads).
+fn max_cpu_threads() -> u32 {
+    std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(16)
 }
 
 /// "Bitcoin | Monero" for the CPU miners here and on the home server.
