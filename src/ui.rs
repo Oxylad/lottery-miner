@@ -35,6 +35,9 @@ const WARN: u32 = 0xd29922;
 const ERROR: u32 = 0xf85149;
 const ON_ACCENT: u32 = 0x14110c;
 
+/// From this window width (logical px) the Bitcoin and Monero cards sit side by side.
+const WIDE_LAYOUT_MIN: f32 = 1500.0;
+
 /// A color at about 15% opacity, for pill and banner backgrounds.
 fn tint(color: u32) -> gpui::Rgba {
     rgba((color << 8) | 0x26)
@@ -260,7 +263,8 @@ fn kv_colored(label: impl Into<SharedString>, value: impl Into<SharedString>, co
         .gap_4()
         .text_sm()
         .child(div().flex_none().text_color(rgb(MUTED)).child(label.into()))
-        .child(div().min_w(px(0.)).text_right().text_color(rgb(color)).child(value.into()))
+        // The value takes the rest of the row, so it never collapses to a sliver.
+        .child(div().flex_1().min_w(px(0.)).text_right().text_color(rgb(color)).child(value.into()))
         .into_any_element()
 }
 
@@ -274,14 +278,22 @@ fn divider() -> AnyElement {
 
 /// A card with a title row; `right` goes on the title's right (pill, switch...).
 fn card(title: &str, right: Option<AnyElement>) -> gpui::Div {
+    // The title may wrap; whatever sits on the right keeps its size and stays inside.
     let mut head = div()
         .flex()
         .justify_between()
         .items_center()
         .gap_2()
-        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title.to_string()));
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.to_string()),
+        );
     if let Some(r) = right {
-        head = head.child(r);
+        head = head.child(div().flex_none().child(r));
     }
     div()
         .flex()
@@ -386,7 +398,9 @@ fn max_cpu_threads() -> u32 {
 // ------------------------------------------------------------------ render
 
 impl Render for Dashboard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Window width in logical pixels, for the few layout choices that depend on it.
+        let wide = window.viewport_size().width >= px(WIDE_LAYOUT_MIN);
         let mut root = div()
             .id("root")
             .size_full()
@@ -418,7 +432,7 @@ impl Render for Dashboard {
         }
         root = root.child(tab_bar(self.view, cx));
         match self.view {
-            View::Dashboard => root.child(self.overview(cx)),
+            View::Dashboard => root.child(self.overview(wide, cx)),
             View::Settings => root.child(self.settings_view(cx)),
             View::Logs => root.child(self.logs_view(cx)),
         }
@@ -486,7 +500,7 @@ impl Dashboard {
 
     // -------------------------------------------------------------- overview
 
-    fn overview(&self, cx: &Context<Self>) -> AnyElement {
+    fn overview(&self, wide: bool, cx: &Context<Self>) -> AnyElement {
         let net = self.network_numbers();
         let btc_local = self.total_hashrate();
         let btc_oxy = self.oxyhome_hashrate();
@@ -556,17 +570,25 @@ impl Dashboard {
                     .gap_3()
                     .w_full()
                     .child(column().child(self.this_pc_card(cx)).child(self.idle_card(cx)))
-                    .child(
-                        column().child(self.server_card(cx)).child(
+                    .child({
+                        let btc = self.bitcoin_card(&net, btc_local, btc_oxy, cx);
+                        let xmr = self.monero_card(xmr_local, xmr_oxy, xmr_total);
+                        let right = column().child(self.server_card(cx));
+                        if wide {
                             // The two coins side by side under the server.
-                            div()
-                                .flex()
-                                .gap_3()
-                                .w_full()
-                                .child(column().child(self.bitcoin_card(&net, btc_local, btc_oxy, cx)))
-                                .child(column().child(self.monero_card(xmr_local, xmr_oxy, xmr_total))),
-                        ),
-                    ),
+                            right.child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .w_full()
+                                    .child(column().child(btc))
+                                    .child(column().child(xmr)),
+                            )
+                        } else {
+                            // Not enough room: stack them.
+                            right.child(btc).child(xmr)
+                        }
+                    }),
             )
             .into_any_element()
     }
