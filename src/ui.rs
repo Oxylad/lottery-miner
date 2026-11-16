@@ -556,12 +556,16 @@ impl Dashboard {
                     .gap_3()
                     .w_full()
                     .child(column().child(self.this_pc_card(cx)).child(self.idle_card(cx)))
-                    .child(
-                        column()
-                            .child(self.server_card(cx))
-                            .child(self.bitcoin_card(&net, btc_local, btc_oxy, cx))
-                            .child(self.monero_card(xmr_local, xmr_oxy, xmr_total)),
-                    ),
+                    .child(column().child(self.server_card(cx))),
+            )
+            // The two coins side by side.
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .w_full()
+                    .child(column().child(self.bitcoin_card(&net, btc_local, btc_oxy, cx)))
+                    .child(column().child(self.monero_card(xmr_local, xmr_oxy, xmr_total))),
             )
             .into_any_element()
     }
