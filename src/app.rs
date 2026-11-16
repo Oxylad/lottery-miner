@@ -566,6 +566,10 @@ impl Dashboard {
             self.message = Some("That is not a valid Monero address (95 or 106 characters, starts with 4 or 8).".into());
             return;
         }
+        if let Some(hint) = settings::monero_node_port_hint(&pool) {
+            self.message = Some(hint.to_string());
+            return;
+        }
         if !settings::is_pool_host_port(&pool) {
             self.message = Some("Monero pool must be host:port, for example pool.supportxmr.com:443.".into());
             return;

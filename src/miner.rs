@@ -221,6 +221,9 @@ impl Miner {
         if !crate::settings::is_monero_address(m.address.trim()) {
             return Err("Set a valid Monero address in Settings first.".into());
         }
+        if let Some(hint) = crate::settings::monero_node_port_hint(&m.pool) {
+            return Err(hint.to_string());
+        }
         if !crate::settings::is_pool_host_port(m.pool.trim()) {
             return Err(format!("Monero pool \"{}\" must be host:port", m.pool.trim()));
         }

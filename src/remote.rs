@@ -284,6 +284,9 @@ pub fn switch_script(coin: Coin, monero: &MoneroSettings) -> Result<String, Stri
             if !is_monero_address(addr) {
                 return Err("Set a valid Monero address first.".into());
             }
+            if let Some(hint) = crate::settings::monero_node_port_hint(pool) {
+                return Err(hint.to_string());
+            }
             if !is_pool_host_port(pool) {
                 return Err(format!("Monero pool \"{pool}\" must be host:port"));
             }

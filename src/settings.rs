@@ -137,6 +137,16 @@ pub fn is_pool_host_port(s: &str) -> bool {
         && port.parse::<u16>().map(|p| p > 0).unwrap_or(false)
 }
 
+/// monerod's own ports (P2P, RPC, restricted RPC). A node is not a mining
+/// pool: XMRig pointed at one gets no work. Mining through your own node
+/// is what P2Pool is for.
+pub fn monero_node_port_hint(pool: &str) -> Option<&'static str> {
+    let port = pool.trim().rsplit_once(':')?.1.parse::<u16>().ok()?;
+    matches!(port, 18080 | 18081 | 18089).then_some(
+        "That is a Monero node port, not a mining pool. Use a pool such as pool.supportxmr.com:443 (or P2Pool on port 3333 once it is set up).",
+    )
+}
+
 /// Choices for the idle slider, in minutes.
 pub const IDLE_STEPS: [u32; 12] = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120];
 
@@ -403,6 +413,16 @@ mod tests {
         assert!(!is_monero_address(&format!("{}0", &x[..94])), "0 is not Base58");
         assert!(!is_monero_address(&format!("{}; rm", &x[..91])), "shell characters");
         assert!(!is_monero_address(""));
+    }
+
+    #[test]
+    fn node_ports_are_not_pools() {
+        assert!(monero_node_port_hint("oxyhome.home:18089").is_some());
+        assert!(monero_node_port_hint("127.0.0.1:18081").is_some());
+        assert!(monero_node_port_hint("node:18080").is_some());
+        assert!(monero_node_port_hint("pool.supportxmr.com:443").is_none());
+        assert!(monero_node_port_hint("oxyhome.home:3333").is_none(), "P2Pool's stratum port is fine");
+        assert!(monero_node_port_hint("garbage").is_none());
     }
 
     #[test]
