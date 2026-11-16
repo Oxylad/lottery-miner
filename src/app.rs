@@ -57,6 +57,9 @@ pub struct Dashboard {
     pub pool: Option<Result<Option<PoolUser>, String>>,
     pub network: Option<Result<Network, String>>,
     pub xmr_net: Option<Result<MoneroNet, String>>,
+    /// Last (time, height) of the server's Monero node and its sync speed (blocks/s).
+    node_sample: Option<(Instant, u64)>,
+    pub node_rate: Option<f64>,
     /// Coin of the CPU miners that are running (or last ran).
     pub cpu_coin: Coin,
     pub oxyhome: Option<Result<OxyhomeStats, String>>,
@@ -177,6 +180,8 @@ impl Dashboard {
             pool: None,
             network: None,
             xmr_net: None,
+            node_sample: None,
+            node_rate: None,
             cpu_coin: Coin::Bitcoin,
             oxyhome: None,
             oxyhome_busy: false,
@@ -275,6 +280,21 @@ impl Dashboard {
             Ok(s) => {
                 if let Ok(mut b) = self.logbook.lock() {
                     b.push_server(&s.journal);
+                }
+                // Node sync speed between probes, smoothed, for the time-left estimate.
+                if let Some(n) = &s.node {
+                    let now = Instant::now();
+                    if let Some((t, h)) = self.node_sample {
+                        let secs = now.duration_since(t).as_secs_f64();
+                        if secs > 5.0 && n.height >= h {
+                            let rate = (n.height - h) as f64 / secs;
+                            self.node_rate = Some(match self.node_rate {
+                                Some(old) => old * 0.7 + rate * 0.3,
+                                None => rate,
+                            });
+                        }
+                    }
+                    self.node_sample = Some((now, n.height));
                 }
                 if self.last_server_error.take().is_some() {
                     self.log("oxyhome: SSH connection works again");

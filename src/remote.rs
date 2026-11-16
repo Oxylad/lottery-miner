@@ -14,7 +14,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Only fixed commands; no user text is interpolated.
 /// Reports cpuminer and xmrig, then details for the selected unit: xmrig if it is
 /// enabled or running (the app switched the server to Monero), else cpuminer.
-const PROBE: &str = "systemctl is-active cpuminer; echo ---XMRIG; systemctl is-active xmrig; U=cpuminer; systemctl is-enabled --quiet xmrig && U=xmrig; systemctl is-active --quiet xmrig && U=xmrig; echo ---UNIT; echo $U; echo ---SHOW; systemctl show $U -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u $U -o short-unix -n 300; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
+const PROBE: &str = "systemctl is-active cpuminer; echo ---XMRIG; systemctl is-active xmrig; U=cpuminer; systemctl is-enabled --quiet xmrig && U=xmrig; systemctl is-active --quiet xmrig && U=xmrig; echo ---UNIT; echo $U; echo ---SHOW; systemctl show $U -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u $U -o short-unix -n 300; echo ---NODE; curl -s -m 5 http://127.0.0.1:18081/get_info 2>/dev/null; echo; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OxyhomeStats {
@@ -27,9 +27,57 @@ pub struct OxyhomeStats {
     pub restarts: Option<u32>,
     pub log: LogState,
     pub temp_c: Option<f64>,
+    /// Monero node (monerod) status, if one runs on the server.
+    pub node: Option<NodeStatus>,
     /// Journal lines as (unix time, message), oldest first.
     pub journal: Vec<(f64, String)>,
     pub watts: Option<f64>,
+}
+
+/// From monerod's get_info (server-local full RPC).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeStatus {
+    pub height: u64,
+    /// Network height the node is syncing towards (0 or below height once synced).
+    pub target_height: u64,
+    pub synchronized: bool,
+    pub out_peers: u64,
+    pub in_peers: u64,
+    pub database_bytes: u64,
+    pub version: String,
+}
+
+impl NodeStatus {
+    /// Sync progress 0..=1.
+    pub fn progress(&self) -> f64 {
+        if self.synchronized {
+            return 1.0;
+        }
+        let target = self.target_height.max(self.height);
+        if target == 0 { 0.0 } else { self.height as f64 / target as f64 }
+    }
+
+    pub fn remaining_blocks(&self) -> u64 {
+        if self.synchronized { 0 } else { self.target_height.saturating_sub(self.height) }
+    }
+}
+
+/// Parses monerod's get_info JSON; None if empty or not a node reply.
+pub fn parse_node_info(json: &str) -> Option<NodeStatus> {
+    let v: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    if v.get("status")?.as_str()? != "OK" {
+        return None;
+    }
+    let u = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(NodeStatus {
+        height: u("height"),
+        target_height: u("target_height"),
+        synchronized: v.get("synchronized").and_then(|x| x.as_bool()).unwrap_or(false),
+        out_peers: u("outgoing_connections_count"),
+        in_peers: u("incoming_connections_count"),
+        database_bytes: u("database_size"),
+        version: v.get("version").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,6 +251,7 @@ pub fn parse_probe(text: &str) -> OxyhomeStats {
         }
     }
     stats.log = parse::parse_journal(&messages.join("\n"));
+    stats.node = parts.get("NODE").and_then(|v| parse_node_info(&v.join("\n")));
     let temp_text = parts.get("TEMP").map(|v| v.join("\n")).unwrap_or_default();
     stats.temp_c = parse::parse_package_temp(&temp_text);
     if let Some(energy) = parts.get("ENERGY").and_then(|v| v.first()) {
@@ -297,6 +346,36 @@ Package id 0:  +61.0°C  (high = +86.0°C, crit = +100.0°C)
         // Old-style output (no UNIT section) means cpuminer.
         assert_eq!(parse_probe(PROBE_OUT).unit, "cpuminer");
         assert!(parse_probe(PROBE_OUT).service_active);
+    }
+
+    #[test]
+    fn node_status_from_probe() {
+        // get_info captured from oxyhome during the first sync (trimmed).
+        let info = r#"{
+  "busy_syncing": false,
+  "database_size": 4310794240,
+  "height": 389872,
+  "incoming_connections_count": 0,
+  "outgoing_connections_count": 12,
+  "status": "OK",
+  "synchronized": false,
+  "target_height": 3807787,
+  "version": "0.18.5.4-release"
+}"#;
+        let out = format!("active\n---SHOW\nLoadState=loaded\n---LOG\n---NODE\n{info}\n\n---TEMP\n---ENERGY\n");
+        let s = parse_probe(&out);
+        let n = s.node.expect("node parsed");
+        assert_eq!(n.height, 389872);
+        assert_eq!(n.out_peers, 12);
+        assert!(!n.synchronized);
+        assert!((n.progress() - 0.1024).abs() < 0.001, "got {}", n.progress());
+        assert_eq!(n.remaining_blocks(), 3807787 - 389872);
+        assert_eq!(n.version, "0.18.5.4-release");
+        // No node (curl printed nothing) and a synced node.
+        assert!(parse_probe("active\n---NODE\n\n---TEMP\n").node.is_none());
+        let synced = parse_node_info(r#"{"status":"OK","height":3807790,"target_height":0,"synchronized":true}"#).unwrap();
+        assert_eq!(synced.progress(), 1.0);
+        assert_eq!(synced.remaining_blocks(), 0);
     }
 
     #[test]

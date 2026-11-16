@@ -457,6 +457,52 @@ impl Render for Dashboard {
             .child(row("This PC (XMRig)", fmt_hr(Some(xmr_local).filter(|h| *h > 0.0))))
             .child(row("oxyhome (xmrig)", fmt_hr(xmr_oxy)))
             .child(row("Total", fmt_hr(Some(xmr_total).filter(|h| *h > 0.0))));
+        // The server's own Monero node (monerod), if one runs there.
+        match &self.oxyhome {
+            Some(Ok(s)) => match &s.node {
+                Some(n) if n.synchronized => {
+                    monero = monero
+                        .child(row_colored(
+                            "oxyhome node",
+                            format!("synced, block {}, {}+{} peers", n.height, n.out_peers, n.in_peers),
+                            GOOD,
+                        ))
+                        .child(note(
+                            "Wallets on your network (Feather, Monero GUI): node oxyhome.home:18089",
+                            MUTED,
+                        ));
+                }
+                Some(n) => {
+                    monero = monero.child(row_colored(
+                        "oxyhome node",
+                        format!(
+                            "syncing {:.1}% ({} / {}), {} peers",
+                            n.progress() * 100.0,
+                            n.height,
+                            n.target_height,
+                            n.out_peers + n.in_peers
+                        ),
+                        WARN,
+                    ));
+                    let left = match self.node_rate.filter(|r| *r > 0.0) {
+                        Some(rate) => format!(
+                            "about {} at the current speed ({:.0} blocks/s; later blocks are slower)",
+                            fmt_duration(Duration::from_secs_f64(n.remaining_blocks() as f64 / rate)),
+                            rate
+                        ),
+                        None => "measuring speed...".to_string(),
+                    };
+                    monero = monero
+                        .child(row("Time left", left))
+                        .child(row(
+                            "Node database",
+                            format!("{:.1} GB", n.database_bytes as f64 / 1e9),
+                        ));
+                }
+                None => monero = monero.child(row("oxyhome node", "not running")),
+            },
+            _ => {}
+        }
         match &self.xmr_net {
             None => monero = monero.child(note("Loading Monero network numbers...", MUTED)),
             Some(Err(e)) => monero = monero.child(note(format!("Monero stats: {e}"), ERROR)),
