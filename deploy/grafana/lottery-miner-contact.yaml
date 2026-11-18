@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# Discord channel for Lottery Miner alerts only (webhook in .env as
+# LM_DISCORD_WEBHOOK, passed to the grafana container). The block-found rule
+# routes here directly, so other alerts keep their own setup.
+contactPoints:
+  - orgId: 1
+    name: discord-lottery-miner
+    receivers:
+      - uid: discord-lottery-miner
+        type: discord
+        settings:
+          url: ${LM_DISCORD_WEBHOOK}
+          use_discord_username: true
+        disableResolveMessage: true

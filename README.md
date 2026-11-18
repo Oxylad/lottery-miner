@@ -155,7 +155,10 @@ if the app dies, panels hide data older than 2 minutes.
   listens on the Tailscale IP only.
 - `deploy/grafana/`: `make_dashboard.py` writes the dashboard JSON (odds are
   computed in PromQL from the combined hashrate), plus the "block found"
-  Grafana alert rule.
+  Grafana alert rule, routed to its own Discord contact point
+  (`lottery-miner-contact.yaml`, webhook in the server .env as LM_DISCORD_WEBHOOK).
+- `deploy/oxyhome/backfill.py`: one-off import of past oxyhome history from the
+  journal (hashrate, jobs, shares, best share) via `promtool tsdb create-blocks-from openmetrics`.
 - Server side (OVH): Pushgateway container on 127.0.0.1:9091, nginx route
   `/lm-push/metrics/job/lottery_miner/` with basic auth (PUT/POST/DELETE only),
   Prometheus jobs `lottery_miner` (honor_labels) and `lottery_oxyhome`.

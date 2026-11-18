@@ -13,6 +13,8 @@ groups:
         title: Lottery Miner found a block
         condition: C
         for: 0s
+        notification_settings:
+          receiver: discord-lottery-miner
         labels:
           severity: critical
         annotations:
