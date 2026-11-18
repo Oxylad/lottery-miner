@@ -136,3 +136,26 @@ steady small payouts. Set your Monero address in the Monero card first.
 - The Monero card estimates XMR and EUR per day/year from your hashrate,
   the network hashrate and block reward (moneroblocks.info) and the XMR price
   (CoinGecko).
+
+## Grafana metrics (Prometheus)
+
+The app can push its stats every 15 s to a Prometheus Pushgateway, for the
+"Lottery Miner" Grafana dashboard. Turn it on in Settings > Grafana metrics.
+URL, user, password and the Cloudflare Access service token live in the
+`metrics` section of `%APPDATA%\lottery-miner\settings.json` (never in git).
+On Quit the app deletes its group, so the dashboard shows it offline at once;
+if the app dies, panels hide data older than 2 minutes.
+
+- What it pushes: hashrate per miner process, accepted/rejected shares, real
+  difficulty of the latest and best share, jobs received, blocks found, pool
+  stats (ckpool per worker, SupportXMR balance), coin prices, network
+  difficulty/hashrate and the latest block of both coins, idle state.
+- `deploy/oxyhome/`: read-only exporter for the home server (cpuminer/xmrig
+  journals, XMRig API, monerod RPC, CPU temp and power), a systemd unit that
+  listens on the Tailscale IP only.
+- `deploy/grafana/`: `make_dashboard.py` writes the dashboard JSON (odds are
+  computed in PromQL from the combined hashrate), plus the "block found"
+  Grafana alert rule.
+- Server side (OVH): Pushgateway container on 127.0.0.1:9091, nginx route
+  `/lm-push/metrics/job/lottery_miner/` with basic auth (PUT/POST/DELETE only),
+  Prometheus jobs `lottery_miner` (honor_labels) and `lottery_oxyhome`.

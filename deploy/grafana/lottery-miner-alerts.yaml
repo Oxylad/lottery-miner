@@ -1,0 +1,40 @@
+apiVersion: 1
+
+# Lottery Miner: the jackpot alert. Fires when any miner reports a share at or
+# above the Bitcoin network difficulty (a block), from the miners' own logs
+# (BLOCK SOLVED / BLOCK CANDIDATE) or from ckpool's best share.
+groups:
+  - orgId: 1
+    name: lottery-miner
+    folder: Alerts
+    interval: 1m
+    rules:
+      - uid: lm-block-found
+        title: Lottery Miner found a block
+        condition: C
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "A Lottery Miner share reached the Bitcoin network difficulty: check ckpool and your wallet"
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: PBFA97CFB590B2093
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                (sum(increase(lm_blocks_found_total[15m])) or vector(0))
+                + (count(max(lm_pool_best_share_difficulty{coin="btc"}) >= scalar(max(lm_network_difficulty{coin="btc"}))) or vector(0))
+                + (count(max(lm_share_best_difficulty{coin="btc"}) >= scalar(max(lm_network_difficulty{coin="btc"}))) or vector(0))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }

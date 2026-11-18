@@ -6,6 +6,7 @@ mod app;
 mod input;
 mod job;
 mod logbook;
+mod metrics;
 mod miner;
 mod network;
 mod odds;
@@ -150,6 +151,7 @@ fn spawn_tray_loop(tray: Tray, dashboard: Entity<Dashboard>, cx: &mut App) {
             if quit {
                 let _ = cx.update(|cx| {
                     dashboard.update(cx, |d, _| {
+                        d.delete_metrics();
                         if d.settings.stop_miners_on_quit {
                             d.stop_local_miners();
                         } else {

@@ -175,6 +175,59 @@ impl Default for IdleSettings {
     }
 }
 
+/// Pushes stats to a Prometheus Pushgateway (Grafana dashboard on the OVH
+/// server). The password lives only in settings.json, never in git.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetricsSettings {
+    pub enabled: bool,
+    /// Base URL up to the job, e.g. https://grafana.oxylad.me/lm-push/metrics/job/lottery_miner
+    pub url: String,
+    pub user: String,
+    pub password: String,
+    /// Grouping label, one per PC.
+    pub instance: String,
+    pub interval_secs: u64,
+    /// Cloudflare Access service token (the host sits behind Access); empty = not sent.
+    pub cf_access_client_id: String,
+    pub cf_access_client_secret: String,
+}
+
+impl Default for MetricsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: "https://grafana.oxylad.me/lm-push/metrics/job/lottery_miner".to_string(),
+            user: "lottery-miner".to_string(),
+            password: String::new(),
+            instance: "desktop".to_string(),
+            interval_secs: 15,
+            cf_access_client_id: String::new(),
+            cf_access_client_secret: String::new(),
+        }
+    }
+}
+
+impl MetricsSettings {
+    /// Full group URL: <url>/instance/<instance>.
+    pub fn group_url(&self) -> String {
+        format!("{}/instance/{}", self.url.trim().trim_end_matches('/'), self.instance.trim())
+    }
+
+    pub fn ready(&self) -> bool {
+        let url = self.url.trim();
+        // Plain http only to this PC (an SSH tunnel), never over the network.
+        let secure = url.starts_with("https://")
+            || url.starts_with("http://127.0.0.1:")
+            || url.starts_with("http://localhost:");
+        self.enabled
+            && secure
+            && !self.password.is_empty()
+            && !self.instance.trim().is_empty()
+            && self.instance.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+}
+
 /// What idle mode should do now, given the idle time. Pure, for tests.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IdleAction {
@@ -232,6 +285,7 @@ pub struct Settings {
     /// Coin for the CPU miners here and on the home server.
     pub coin: Coin,
     pub monero: MoneroSettings,
+    pub metrics: MetricsSettings,
 }
 
 impl Default for Settings {
@@ -254,6 +308,7 @@ impl Default for Settings {
             idle: IdleSettings::default(),
             coin: Coin::Bitcoin,
             monero: MoneroSettings::default(),
+            metrics: MetricsSettings::default(),
         }
     }
 }
@@ -339,6 +394,29 @@ pub fn save_to(path: &Path, settings: &Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_ready_rules() {
+        let mut m = MetricsSettings { enabled: true, password: "p".into(), ..Default::default() };
+        assert!(m.ready());
+        assert_eq!(
+            m.group_url(),
+            "https://grafana.oxylad.me/lm-push/metrics/job/lottery_miner/instance/desktop"
+        );
+        m.url = "http://example.com/metrics/job/x".into();
+        assert!(!m.ready(), "plain http only to this PC");
+        m.url = "http://127.0.0.1:19091/metrics/job/lottery_miner/".into();
+        assert!(m.ready());
+        assert!(m.group_url().ends_with("lottery_miner/instance/desktop"));
+        m.instance = "my pc".into();
+        assert!(!m.ready());
+        m.instance = "desktop".into();
+        m.password.clear();
+        assert!(!m.ready());
+        m.password = "p".into();
+        m.enabled = false;
+        assert!(!m.ready());
+    }
 
     fn temp_file(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lm-test-{}-{}", name, std::process::id()));

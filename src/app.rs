@@ -7,7 +7,7 @@ use gpui::{AppContext, AsyncApp, Context, Entity, WeakEntity};
 
 use crate::input::TextInput;
 use crate::miner::{self, InstanceHandle, Miner};
-use crate::network::{self, MoneroNet, Network, PoolUser};
+use crate::network::{self, MoneroNet, Network, PoolUser, XmrPool};
 use crate::remote::{self, OxyhomeStats, ServiceAction};
 use crate::settings::{self, Coin, IdleAction, Settings};
 use crate::logbook::{self, Filter, SharedLog, Source};
@@ -36,6 +36,16 @@ pub struct InstanceView {
     /// GPU name reported by gpu-miner.
     pub device: Option<String>,
     pub last_error: Option<String>,
+    pub stratum_resets: u32,
+    /// Pool share difficulty (stratum target) and the block of the current job.
+    pub pool_diff: Option<f64>,
+    pub block: Option<u64>,
+    pub jobs: u64,
+    pub last_job_unix: Option<f64>,
+    pub last_share_diff: Option<f64>,
+    pub best_share_diff: Option<f64>,
+    pub last_share_unix: Option<f64>,
+    pub blocks_found: u64,
 }
 
 pub struct Dashboard {
@@ -74,6 +84,12 @@ pub struct Dashboard {
     last_server_error: Option<String>,
     pub hwnd: Option<isize>,
     pub form: Form,
+    /// SupportXMR stats for the Monero address.
+    pub xmr_pool: Option<Result<Option<XmrPool>, String>>,
+    started_unix: f64,
+    /// Last metrics push: Ok(unix time) or the error.
+    pub metrics_status: Option<Result<f64, String>>,
+    metrics_busy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +210,10 @@ impl Dashboard {
             log_filter: None,
             last_server_error: None,
             hwnd: None,
+            xmr_pool: None,
+            started_unix: crate::parse::now_unix(),
+            metrics_status: None,
+            metrics_busy: false,
         };
         if this.settings.start_mining_on_launch {
             this.start_mining();
@@ -204,7 +224,183 @@ impl Dashboard {
         Self::spawn_local_loop(cx);
         Self::spawn_slow_loop(cx);
         Self::spawn_idle_loop(cx);
+        Self::spawn_metrics_loop(cx);
         this
+    }
+
+    /// Pushes the metrics every interval while enabled (Settings, Grafana).
+    fn spawn_metrics_loop(cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            loop {
+                let Ok((job, secs)) = this.update(cx, |d, _| {
+                    let m = &d.settings.metrics;
+                    let job = if m.ready() && !d.metrics_busy {
+                        d.metrics_busy = true;
+                        Some((m.clone(), d.metrics_text()))
+                    } else {
+                        None
+                    };
+                    (job, m.interval_secs.clamp(5, 300))
+                }) else {
+                    break;
+                };
+                if let Some((m, body)) = job {
+                    let res = cx
+                        .background_executor()
+                        .spawn(async move { crate::metrics::push(&m, &body) })
+                        .await;
+                    let _ = this.update(cx, |d, cx| {
+                        d.metrics_busy = false;
+                        d.record_push(res);
+                        cx.notify();
+                    });
+                }
+                cx.background_executor().timer(Duration::from_secs(secs)).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Logs only when the push state changes (works / fails with a new error).
+    fn record_push(&mut self, res: Result<(), String>) {
+        match res {
+            Ok(()) => {
+                if !matches!(self.metrics_status, Some(Ok(_))) {
+                    self.log("metrics: pushing to the Pushgateway");
+                }
+                self.metrics_status = Some(Ok(crate::parse::now_unix()));
+            }
+            Err(e) => {
+                if self.metrics_status.as_ref().and_then(|s| s.as_ref().err()) != Some(&e) {
+                    self.log(&format!("metrics: push failed: {e}"));
+                }
+                self.metrics_status = Some(Err(e));
+            }
+        }
+    }
+
+    /// Deletes this PC's metrics on Quit so Grafana shows it offline at once.
+    pub fn delete_metrics(&self) {
+        let m = &self.settings.metrics;
+        if m.ready() {
+            let _ = crate::metrics::delete(m);
+        }
+    }
+
+    pub fn set_metrics_enabled(&mut self, enabled: bool) {
+        if !enabled && self.settings.metrics.enabled {
+            self.delete_metrics();
+            self.metrics_status = None;
+        }
+        self.settings.metrics.enabled = enabled;
+        self.save_settings();
+        if enabled && self.settings.metrics.password.is_empty() {
+            self.message = Some("Metrics: set metrics.password in settings.json, then Reload settings.".into());
+        }
+    }
+
+    /// Everything the Grafana dashboard shows from this PC, in Prometheus text format.
+    pub fn metrics_text(&self) -> String {
+        let mut w = crate::metrics::Writer::new();
+        let now = crate::parse::now_unix();
+        let b = |x: bool| if x { 1.0 } else { 0.0 };
+        w.gauge("lm_app_info", "App version (always 1).", &[("version", env!("CARGO_PKG_VERSION"))], 1.0);
+        w.gauge("lm_last_push_timestamp_seconds", "When this push was built (unix s); stale means the app is gone.", &[], now);
+        w.gauge("lm_app_start_timestamp_seconds", "When the app started (unix s).", &[], self.started_unix);
+        for c in [Coin::Bitcoin, Coin::Monero] {
+            w.gauge("lm_cpu_coin_selected", "Coin selected for the CPU miners (1 = selected).", &[("coin", ticker(c))], b(self.settings.coin == c));
+        }
+        w.gauge("lm_idle_seconds", "Seconds since the last keyboard/mouse input.", &[], self.idle_secs as f64);
+        w.gauge("lm_idle_mode_enabled", "Idle mining is switched on.", &[], b(self.settings.idle.enabled));
+        w.gauge("lm_idle_mining", "Miners started by idle mode are running.", &[], b(self.idle_mining()));
+        w.gauge("lm_idle_minutes", "Idle minutes before idle mining starts.", &[], self.settings.idle.minutes as f64);
+
+        let cpu_coin = ticker(self.cpu_coin);
+        let cpu_miner = if self.cpu_coin == Coin::Monero { "xmrig" } else { "cpuminer" };
+        w.gauge("lm_component_up", "Component running (1) or not (0).", &[("component", "cpu_miner"), ("coin", cpu_coin)], b(self.miner.is_running()));
+        w.gauge("lm_component_up", "Component running (1) or not (0).", &[("component", "gpu_miner"), ("coin", "btc")], b(self.gpu_miner.is_running()));
+        w.gauge("lm_component_processes", "Miner processes running.", &[("component", "cpu_miner")], self.local.len() as f64);
+        for v in &self.local {
+            write_process(&mut w, cpu_coin, cpu_miner, v);
+        }
+        if let Some(g) = &self.gpu {
+            write_process(&mut w, "btc", "gpu", g);
+        }
+
+        // ckpool solo (Bitcoin): whole address and per worker.
+        let ok = matches!(&self.pool, Some(Ok(_)));
+        w.gauge("lm_source_up", "Last fetch from this data source worked.", &[("source", "ckpool")], b(ok));
+        if let Some(Ok(Some(u))) = &self.pool {
+            let p = [("coin", "btc"), ("pool", "ckpool")];
+            w.gauge_opt("lm_pool_hashrate_hps", "Hashrate the pool sees, H/s.", &[p[0], p[1], ("worker", "all"), ("window", "1m")], u.hashrate_1m);
+            w.gauge_opt("lm_pool_hashrate_hps", "Hashrate the pool sees, H/s.", &[p[0], p[1], ("worker", "all"), ("window", "1h")], u.hashrate_1hr);
+            w.gauge_opt("lm_pool_shares", "Shares the pool counted (ckpool resets this on its side).", &[p[0], p[1], ("worker", "all")], u.shares.map(|x| x as f64));
+            w.gauge_opt("lm_pool_best_share_difficulty", "Best share difficulty at the pool.", &[p[0], p[1], ("worker", "all"), ("scope", "round")], u.best_share);
+            w.gauge_opt("lm_pool_best_share_difficulty", "Best share difficulty at the pool.", &[p[0], p[1], ("worker", "all"), ("scope", "ever")], u.best_ever);
+            w.gauge_opt("lm_pool_last_share_timestamp_seconds", "Time of the last share the pool got (unix s).", &[p[0], p[1], ("worker", "all")], u.last_share_unix.map(|t| t as f64));
+            for wk in &u.workers {
+                let name = wk.name.rsplit('.').next().unwrap_or(&wk.name);
+                let l = |extra: (&'static str, &'static str)| [p[0], p[1], ("worker", name), extra];
+                w.gauge_opt("lm_pool_hashrate_hps", "Hashrate the pool sees, H/s.", &l(("window", "1m")), wk.hashrate_1m);
+                w.gauge_opt("lm_pool_hashrate_hps", "Hashrate the pool sees, H/s.", &l(("window", "1h")), wk.hashrate_1hr);
+                w.gauge_opt("lm_pool_best_share_difficulty", "Best share difficulty at the pool.", &l(("scope", "round")), wk.best_share);
+                w.gauge_opt("lm_pool_best_share_difficulty", "Best share difficulty at the pool.", &l(("scope", "ever")), wk.best_ever);
+                w.gauge_opt("lm_pool_shares", "Shares the pool counted (ckpool resets this on its side).", &[p[0], p[1], ("worker", name)], wk.shares.map(|x| x as f64));
+                w.gauge_opt("lm_pool_last_share_timestamp_seconds", "Time of the last share the pool got (unix s).", &[p[0], p[1], ("worker", name)], wk.last_share_unix.map(|t| t as f64));
+            }
+        }
+
+        // SupportXMR (Monero).
+        if self.settings.monero.pool.contains("supportxmr.com") {
+            w.gauge("lm_source_up", "Last fetch from this data source worked.", &[("source", "supportxmr")], b(matches!(&self.xmr_pool, Some(Ok(_)))));
+        }
+        if let Some(Ok(Some(x))) = &self.xmr_pool {
+            let p = [("coin", "xmr"), ("pool", "supportxmr")];
+            w.gauge("lm_pool_hashrate_hps", "Hashrate the pool sees, H/s.", &[p[0], p[1], ("worker", "all"), ("window", "pool")], x.hashrate);
+            w.gauge("lm_pool_shares", "Shares the pool counted (ckpool resets this on its side).", &[p[0], p[1], ("worker", "all")], x.valid_shares as f64);
+            w.gauge("lm_pool_invalid_shares", "Invalid shares at the pool.", &[p[0], p[1]], x.invalid_shares as f64);
+            w.gauge("lm_pool_total_hashes", "Total hashes the pool credited.", &[p[0], p[1]], x.total_hashes);
+            w.gauge_opt("lm_pool_last_share_timestamp_seconds", "Time of the last share the pool got (unix s).", &[p[0], p[1], ("worker", "all")], x.last_share_unix.map(|t| t as f64));
+            w.gauge("lm_pool_balance_coins", "Pool balance in coins.", &[p[0], p[1], ("state", "due")], x.due_xmr);
+            w.gauge("lm_pool_balance_coins", "Pool balance in coins.", &[p[0], p[1], ("state", "paid")], x.paid_xmr);
+        }
+
+        // Bitcoin network (mempool.space).
+        w.gauge("lm_source_up", "Last fetch from this data source worked.", &[("source", "mempool")], b(matches!(&self.network, Some(Ok(_)))));
+        let net = self.network_numbers();
+        let btc = [("coin", "btc")];
+        w.gauge_opt("lm_price_eur", "Coin price in EUR.", &btc, net.eur_per_btc);
+        w.gauge_opt("lm_network_difficulty", "Network difficulty.", &btc, net.difficulty);
+        w.gauge_opt("lm_network_hashrate_hps", "Network hashrate, H/s.", &btc, net.hashrate);
+        w.gauge_opt("lm_avg_block_fees_coins", "Average fees per block over the last day.", &btc, net.avg_fees_sats.map(|s| s / 1e8));
+        if let (Some(fees), Some(eur)) = (net.avg_fees_sats, net.eur_per_btc) {
+            w.gauge("lm_solo_prize_eur", "What a solo block pays after the pool fee, EUR.", &btc, crate::odds::prize_eur(fees, eur));
+        }
+        w.gauge("lm_pool_fee_ratio", "Pool fee as a fraction.", &[("coin", "btc"), ("pool", "ckpool")], crate::odds::POOL_FEE);
+        if let Some(t) = &net.tip {
+            w.gauge("lm_block_height", "Latest block height.", &btc, t.height as f64);
+            w.gauge("lm_block_timestamp_seconds", "Latest block time (unix s).", &btc, t.timestamp as f64);
+            w.gauge("lm_block_reward_coins", "Latest block reward (subsidy + fees), coins.", &btc, t.reward_sats as f64 / 1e8);
+            w.gauge("lm_block_fees_coins", "Latest block fees, coins.", &btc, t.fees_sats as f64 / 1e8);
+            w.gauge("lm_block_tx_count", "Transactions in the latest block.", &btc, t.tx_count as f64);
+            w.gauge("lm_block_size_bytes", "Latest block size.", &btc, t.size as f64);
+            let h = t.height.to_string();
+            w.gauge("lm_block_info", "Latest block, labels carry the details (always 1).", &[("coin", "btc"), ("height", &h), ("pool", &t.pool)], 1.0);
+        }
+
+        // Monero network (moneroblocks.info, CoinGecko).
+        w.gauge("lm_source_up", "Last fetch from this data source worked.", &[("source", "moneroblocks")], b(matches!(&self.xmr_net, Some(Ok(_)))));
+        if let Some(Ok(x)) = &self.xmr_net {
+            let xmr = [("coin", "xmr")];
+            w.gauge_opt("lm_price_eur", "Coin price in EUR.", &xmr, x.eur_per_xmr);
+            w.gauge_opt("lm_network_difficulty", "Network difficulty.", &xmr, x.difficulty);
+            w.gauge_opt("lm_network_hashrate_hps", "Network hashrate, H/s.", &xmr, x.hashrate);
+            w.gauge_opt("lm_block_height", "Latest block height.", &xmr, x.height.map(|h| h as f64));
+            w.gauge_opt("lm_block_timestamp_seconds", "Latest block time (unix s).", &xmr, x.last_timestamp.map(|t| t as f64));
+            w.gauge_opt("lm_block_reward_coins", "Latest block reward (subsidy + fees), coins.", &xmr, x.reward_xmr);
+        }
+        w.gauge("lm_source_up", "Last fetch from this data source worked.", &[("source", "oxyhome_ssh")], b(matches!(&self.oxyhome, Some(Ok(_)))));
+        w.finish()
     }
 
     /// Idle mode, every 2 s on the main thread (keep_awake is per thread).
@@ -764,7 +960,11 @@ impl Dashboard {
                     let now = Instant::now();
                     let net = if now >= d.network_due {
                         d.network_due = now + NETWORK_EVERY;
-                        Some(d.settings.address.clone())
+                        Some((
+                            d.settings.address.clone(),
+                            d.settings.monero.pool.clone(),
+                            d.settings.monero.address.clone(),
+                        ))
                     } else {
                         None
                     };
@@ -779,20 +979,26 @@ impl Dashboard {
                 }) else {
                     break;
                 };
-                if let Some(address) = net_job {
+                if let Some((address, xmr_pool, xmr_address)) = net_job {
                     let weak = this.clone();
                     let mut acx = cx.clone();
                     cx.spawn(async move |_| {
-                        let (pool, net, xmr) = acx
+                        let (pool, net, xmr, xpool) = acx
                             .background_executor()
                             .spawn(async move {
-                                (network::fetch_pool_user(&address), network::fetch_network(), network::fetch_monero())
+                                (
+                                    network::fetch_pool_user(&address),
+                                    network::fetch_network(),
+                                    network::fetch_monero(),
+                                    network::fetch_xmr_pool(&xmr_pool, &xmr_address),
+                                )
                             })
                             .await;
                         let _ = weak.update(&mut acx, |d, cx| {
                             d.pool = Some(pool);
                             d.network = Some(net);
                             d.xmr_net = Some(xmr);
+                            d.xmr_pool = Some(xpool);
                             cx.notify();
                         });
                     })
@@ -822,6 +1028,37 @@ impl Dashboard {
     }
 }
 
+fn ticker(c: Coin) -> &'static str {
+    match c {
+        Coin::Bitcoin => "btc",
+        Coin::Monero => "xmr",
+    }
+}
+
+/// One miner process: hashrate, shares, jobs, best and latest share.
+fn write_process(w: &mut crate::metrics::Writer, coin: &str, miner: &str, v: &InstanceView) {
+    let proc_ = v.index.to_string();
+    let l = [("coin", coin), ("miner", miner), ("proc", proc_.as_str())];
+    let opt = |x: Option<f64>| x;
+    w.gauge("lm_hashrate_hps", "Measured hashrate, H/s.", &l, v.hashrate.unwrap_or(0.0));
+    w.gauge("lm_miner_connected", "Connected to the pool (1) or not (0).", &l, if v.connected { 1.0 } else { 0.0 });
+    w.gauge("lm_miner_stalled", "Waiting for work after running out of nonces.", &l, if v.stalled_now { 1.0 } else { 0.0 });
+    w.gauge("lm_miner_uptime_seconds", "Seconds since this miner process started.", &l, v.uptime.as_secs_f64());
+    let res = |r: &'static str| [l[0], l[1], l[2], ("result", r)];
+    w.counter("lm_shares_total", "Shares since the miner started, by pool verdict.", &res("accepted"), v.accepted as f64);
+    w.counter("lm_shares_total", "Shares since the miner started, by pool verdict.", &res("rejected"), v.rejected as f64);
+    w.counter("lm_jobs_total", "Jobs (new work) received from the pool.", &l, v.jobs as f64);
+    w.gauge_opt("lm_job_last_timestamp_seconds", "When the last job arrived (unix s).", &l, opt(v.last_job_unix));
+    w.counter("lm_stalls_total", "Times the miner ran out of nonces.", &l, v.stall_count as f64);
+    w.counter("lm_stratum_resets_total", "Stratum reconnects.", &l, v.stratum_resets as f64);
+    w.counter("lm_blocks_found_total", "Shares at or above network difficulty (blocks).", &l, v.blocks_found as f64);
+    w.gauge_opt("lm_share_target_difficulty", "Share difficulty the pool asks for.", &l, v.pool_diff);
+    w.gauge_opt("lm_share_last_difficulty", "Real difficulty of the latest submitted share.", &l, v.last_share_diff);
+    w.gauge_opt("lm_share_best_difficulty", "Best share difficulty since the miner started.", &l, v.best_share_diff);
+    w.gauge_opt("lm_share_last_timestamp_seconds", "When the latest share was submitted (unix s).", &l, v.last_share_unix);
+    w.gauge_opt("lm_job_block_height", "Block height of the current job.", &l, v.block.map(|b| b as f64));
+}
+
 /// Merges the API reply (preferred) with the log state for each instance.
 fn collect_local(handles: Vec<InstanceHandle>) -> Vec<InstanceView> {
     handles
@@ -843,6 +1080,15 @@ fn collect_local(handles: Vec<InstanceHandle>) -> Vec<InstanceView> {
                 connected: log.connected,
                 device: None,
                 last_error: log.last_error.clone(),
+                stratum_resets: log.stratum_resets,
+                pool_diff: log.difficulty,
+                block: log.block,
+                jobs: log.jobs,
+                last_job_unix: log.last_job_unix,
+                last_share_diff: log.last_share_diff,
+                best_share_diff: log.best_share_diff,
+                last_share_unix: log.last_share_unix,
+                blocks_found: log.blocks_found,
             };
             match miner::query_stats(&h) {
                 Ok(s) => {
@@ -853,6 +1099,12 @@ fn collect_local(handles: Vec<InstanceHandle>) -> Vec<InstanceView> {
                     v.accepted = v.accepted.max(s.accepted);
                     v.rejected = v.rejected.max(s.rejected);
                     v.device = s.device;
+                    if let Some(b) = s.best_share {
+                        v.best_share_diff = Some(v.best_share_diff.map_or(b, |x| x.max(b)));
+                    }
+                    if h.kind == miner::ApiKind::Xmrig && v.pool_diff.is_none() {
+                        v.pool_diff = s.difficulty;
+                    }
                     // The API's DIFF is the network difficulty.
                     if v.netdiff.is_none() {
                         v.netdiff = s.difficulty.filter(|d| *d > 1e6);

@@ -1,0 +1,46 @@
+# Lottery Miner exporter (read-only): /etc/systemd/system/lm-exporter.service
+# Listens on oxyhome's Tailscale IP only; the OVH Prometheus scrapes it.
+[Unit]
+Description=Lottery Miner Prometheus exporter (read-only)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/lm-exporter/lm-exporter.py
+Environment=LM_LISTEN=100.115.206.97:9841
+Environment=LM_XMRIG_API=http://127.0.0.1:4071/2/summary
+Environment=LM_MONEROD_RPC=http://127.0.0.1:18081
+# Binding fails until Tailscale has its address; try again.
+Restart=always
+RestartSec=10
+
+# Static system user: the D-Bus broker refuses DynamicUser= (systemctl show).
+User=lm-exporter
+Group=lm-exporter
+# Read the miners' journals and the RAPL energy counter (root-only file).
+SupplementaryGroups=systemd-journal
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# Only localhost (miner APIs, monerod) and Tailscale peers may talk to it.
+IPAddressDeny=any
+IPAddressAllow=localhost 100.64.0.0/10
+MemoryMax=96M
+CPUWeight=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -22,7 +22,11 @@ pub struct PoolUser {
 pub struct PoolWorker {
     pub name: String,
     pub hashrate_1m: Option<f64>,
+    pub hashrate_1hr: Option<f64>,
     pub last_share_unix: Option<i64>,
+    pub shares: Option<u64>,
+    pub best_share: Option<f64>,
+    pub best_ever: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -30,6 +34,77 @@ pub struct Network {
     pub difficulty: Option<f64>,
     pub eur_per_btc: Option<f64>,
     pub avg_fees_sats: Option<f64>,
+    /// Network hashrate, H/s (mempool.space 3-day estimate).
+    pub hashrate: Option<f64>,
+    pub tip: Option<BtcBlock>,
+}
+
+/// Latest Bitcoin block (mempool.space /api/v1/blocks, first entry).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BtcBlock {
+    pub height: u64,
+    pub timestamp: i64,
+    pub tx_count: u64,
+    pub size: u64,
+    pub difficulty: f64,
+    /// Subsidy + fees, in sats.
+    pub reward_sats: u64,
+    pub fees_sats: u64,
+    pub pool: String,
+}
+
+pub fn parse_btc_tip(v: &Value) -> Option<BtcBlock> {
+    let b = v.as_array()?.first()?;
+    let extras = b.get("extras");
+    Some(BtcBlock {
+        height: b.get("height")?.as_u64()?,
+        timestamp: b.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0),
+        tx_count: b.get("tx_count").and_then(|x| x.as_u64()).unwrap_or(0),
+        size: b.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
+        difficulty: b.get("difficulty").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        reward_sats: extras.and_then(|e| e.get("reward")).and_then(|x| x.as_u64()).unwrap_or(0),
+        fees_sats: extras.and_then(|e| e.get("totalFees")).and_then(|x| x.as_u64()).unwrap_or(0),
+        pool: extras
+            .and_then(|e| e.get("pool"))
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+    })
+}
+
+/// SupportXMR stats for one address (atomic units are 1e-12 XMR).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct XmrPool {
+    pub hashrate: f64,
+    pub last_share_unix: Option<i64>,
+    pub total_hashes: f64,
+    pub valid_shares: u64,
+    pub invalid_shares: u64,
+    pub due_xmr: f64,
+    pub paid_xmr: f64,
+}
+
+pub fn parse_xmr_pool(v: &Value) -> Option<XmrPool> {
+    let num = |k: &str| v.get(k).and_then(json_f64);
+    Some(XmrPool {
+        hashrate: num("hash")?,
+        last_share_unix: num("lastHash").map(|t| t as i64).filter(|t| *t > 0),
+        total_hashes: num("totalHashes").unwrap_or(0.0),
+        valid_shares: num("validShares").unwrap_or(0.0) as u64,
+        invalid_shares: num("invalidShares").unwrap_or(0.0) as u64,
+        due_xmr: num("amtDue").unwrap_or(0.0) / 1e12,
+        paid_xmr: num("amtPaid").unwrap_or(0.0) / 1e12,
+    })
+}
+
+/// Only for SupportXMR: other pools have other APIs.
+pub fn fetch_xmr_pool(pool: &str, address: &str) -> Result<Option<XmrPool>, String> {
+    if !pool.contains("supportxmr.com") || address.trim().is_empty() {
+        return Ok(None);
+    }
+    let url = format!("https://supportxmr.com/api/miner/{}/stats", address.trim());
+    Ok(remote::get_json(&url)?.as_ref().and_then(parse_xmr_pool))
 }
 
 /// ckpool reports hashrates as strings like "5.44G" or numbers; both become H/s.
@@ -74,7 +149,11 @@ pub fn parse_pool_user(v: &Value) -> PoolUser {
                         .unwrap_or_default()
                         .to_string(),
                     hashrate_1m: w.get("hashrate1m").and_then(json_hashrate),
+                    hashrate_1hr: w.get("hashrate1hr").and_then(json_hashrate),
                     last_share_unix: w.get("lastshare").and_then(|x| x.as_f64()).map(|f| f as i64),
+                    shares: w.get("shares").and_then(|x| x.as_u64()),
+                    best_share: w.get("bestshare").and_then(|x| x.as_f64()),
+                    best_ever: w.get("bestever").and_then(|x| x.as_f64()),
                 })
                 .collect()
         })
@@ -126,6 +205,11 @@ pub fn fetch_network() -> Result<Network, String> {
     let mut net = Network::default();
     if let Some(v) = remote::get_json("https://mempool.space/api/v1/mining/hashrate/3d")? {
         net.difficulty = parse_difficulty(&v);
+        net.hashrate = v.get("currentHashrate").and_then(json_f64);
+    }
+    // The tip is extra; a failure here should not hide the numbers above.
+    if let Ok(Some(v)) = remote::get_json("https://mempool.space/api/v1/blocks") {
+        net.tip = parse_btc_tip(&v);
     }
     if let Some(v) = remote::get_json("https://mempool.space/api/v1/prices")? {
         net.eur_per_btc = parse_eur_price(&v);
@@ -146,6 +230,8 @@ pub struct MoneroNet {
     /// Last block reward in XMR.
     pub reward_xmr: Option<f64>,
     pub eur_per_xmr: Option<f64>,
+    /// Time of the last block (unix s).
+    pub last_timestamp: Option<i64>,
 }
 
 /// moneroblocks.info /api/get_stats ("last_reward" is in atomic units, 1e-12 XMR).
@@ -154,6 +240,7 @@ pub fn parse_monero_stats(v: &Value, net: &mut MoneroNet) {
     net.difficulty = v.get("difficulty").and_then(json_f64);
     net.height = v.get("height").and_then(|x| x.as_u64());
     net.reward_xmr = v.get("last_reward").and_then(json_f64).map(|a| a / 1e12);
+    net.last_timestamp = v.get("last_timestamp").and_then(|x| x.as_i64());
 }
 
 /// CoinGecko simple price: {"monero":{"eur":454.49}}.
@@ -293,11 +380,37 @@ mod tests {
     }
 
     #[test]
+    fn btc_tip_and_supportxmr_fixtures() {
+        // Captured 2026-11-18 (trimmed).
+        let blocks: Value = serde_json::from_str(
+            r#"[{"height":976492,"timestamp":1795038999,"difficulty":134823837323272.7,"tx_count":7655,"size":1648595,"extras":{"reward":312849141,"totalFees":349141,"pool":{"id":111,"name":"Foundry USA","slug":"foundryusa"}}}]"#,
+        )
+        .unwrap();
+        let tip = parse_btc_tip(&blocks).unwrap();
+        assert_eq!(tip.height, 976492);
+        assert_eq!(tip.pool, "Foundry USA");
+        assert_eq!(tip.fees_sats, 349141);
+        assert_eq!(tip.reward_sats, 312849141);
+        assert!(parse_btc_tip(&json!([])).is_none());
+
+        let stats: Value = serde_json::from_str(
+            r#"{"hash":0,"identifier":"global","lastHash":1794848654,"totalHashes":75000,"validShares":1,"invalidShares":0,"expiry":1795039555232,"amtPaid":0,"amtDue":48710,"txnCount":0}"#,
+        )
+        .unwrap();
+        let p = parse_xmr_pool(&stats).unwrap();
+        assert_eq!(p.valid_shares, 1);
+        assert_eq!(p.last_share_unix, Some(1794848654));
+        assert!((p.due_xmr - 4.871e-8).abs() < 1e-15);
+        assert_eq!(p.paid_xmr, 0.0);
+    }
+
+    #[test]
     fn odds_use_network_numbers() {
         let net = Network {
             difficulty: Some(1.4836e14),
             eur_per_btc: Some(90_000.0),
             avg_fees_sats: Some(300_000.0),
+            ..Default::default()
         };
         let o = odds_for(69.4e6, &net);
         let n = o.one_in_per_year.unwrap();

@@ -1112,11 +1112,38 @@ impl Dashboard {
             )
             .child(note(self.settings_path.display().to_string(), FAINT));
 
+        let m = &s.metrics;
+        let (status, color) = match (&self.metrics_status, m.enabled) {
+            (_, false) => ("Off".to_string(), MUTED),
+            (_, true) if m.password.is_empty() => ("No password in settings.json".to_string(), WARN),
+            (_, true) if !m.ready() => ("URL must be https:// and instance one word".to_string(), WARN),
+            (None, true) => ("Starting".to_string(), MUTED),
+            (Some(Ok(t)), true) => {
+                let ago = (crate::parse::now_unix() - t).max(0.0);
+                (format!("Pushed {ago:.0} s ago"), GOOD)
+            }
+            (Some(Err(e)), true) => (e.clone(), ERROR),
+        };
+        let metrics = card("Grafana metrics", None)
+            .child(toggle_row(
+                "Push stats to Prometheus",
+                Some("Every 15 s to the Pushgateway; deleted on Quit"),
+                m.enabled,
+                cx,
+                |d, _| {
+                    let v = !d.settings.metrics.enabled;
+                    d.set_metrics_enabled(v);
+                },
+            ))
+            .child(kv("Endpoint", m.group_url()))
+            .child(kv_colored("Status", status, color))
+            .child(note("URL, user and password: metrics section of settings.json", FAINT));
+
         div()
             .flex()
             .gap_3()
             .w_full()
-            .child(column().child(btc).child(gpu))
+            .child(column().child(btc).child(gpu).child(metrics))
             .child(column().child(xmr).child(ssh).child(app))
             .into_any_element()
     }

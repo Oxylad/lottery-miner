@@ -11,3 +11,6 @@ settings.json
 
 # Downloaded miners (XMRig), not part of the source
 /tools/
+
+# Local secrets (Cloudflare service token)
+service-cred.txt

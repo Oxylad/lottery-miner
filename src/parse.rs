@@ -52,11 +52,42 @@ pub struct LogState {
     pub stalled_now: bool,
     /// Last fatal/startup error line (gpu-miner), shown when the process exits.
     pub last_error: Option<String>,
+    /// Jobs (new work) received from the pool, and when the last one came (unix s).
+    pub jobs: u64,
+    pub last_job_unix: Option<f64>,
+    /// Real difficulty of the last share this miner submitted and the best one
+    /// since it started (share difficulty units, 1 = 2^32 hashes on Bitcoin).
+    pub last_share_diff: Option<f64>,
+    pub best_share_diff: Option<f64>,
+    pub last_share_unix: Option<f64>,
+    /// Shares at or above network difficulty (a block).
+    pub blocks_found: u64,
+}
+
+/// Unix time now in seconds.
+pub fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 impl LogState {
     pub fn rejected(&self) -> u64 {
         self.submitted.saturating_sub(self.accepted)
+    }
+
+    fn job_seen(&mut self) {
+        self.jobs += 1;
+        self.last_job_unix = Some(now_unix());
+    }
+
+    fn share_seen(&mut self, diff: f64) {
+        self.last_share_diff = Some(diff);
+        self.last_share_unix = Some(now_unix());
+        if self.best_share_diff.is_none_or(|b| diff > b) {
+            self.best_share_diff = Some(diff);
+        }
     }
 
     /// Feeds one stdout/stderr line into the state.
@@ -82,6 +113,10 @@ impl LogState {
             self.stalled_now = true;
         } else if line.starts_with("Waiting for new work") {
             self.stalled_now = true;
+        } else if let Some(d) = share_diff_of(line) {
+            self.share_seen(d);
+        } else if line.contains("BLOCK SOLVED") || line.starts_with("BLOCK CANDIDATE") {
+            self.blocks_found += 1;
         } else if line.starts_with("New Stratum Diff") {
             if let Some(d) = field_after(line, "New Stratum Diff ") {
                 self.difficulty = d.trim_end_matches(',').parse().ok();
@@ -90,8 +125,12 @@ impl LogState {
                 self.block = b.trim_end_matches(',').parse().ok();
             }
             self.last_job = field_after(line, "Job ").map(|s| s.to_string());
-        } else if line.starts_with("New Work:") {
+            if self.last_job.as_deref().is_some_and(|j| j != "-") {
+                self.job_seen();
+            }
+        } else if line.starts_with("New Work:") || line.starts_with("New Block ") {
             self.stalled_now = false;
+            self.job_seen();
             if let Some(b) = field_after(line, "Block ") {
                 self.block = b.trim_end_matches(',').parse().ok();
             }
@@ -144,6 +183,7 @@ impl LogState {
             return true;
         }
         if line.contains("new job from ") {
+            self.job_seen();
             self.connected = true;
             self.last_error = None;
             if let Some(d) = field_after(line, "diff ") {
@@ -183,12 +223,30 @@ pub fn parse_xmrig_summary(json: &str) -> Option<ApiSummary> {
         difficulty: results.and_then(|r| r.get("diff_current")).and_then(|x| x.as_f64()),
         uptime_secs: v.get("uptime").and_then(|x| x.as_u64()),
         temp: None,
+        best_share: results
+            .and_then(|r| r.get("best"))
+            .and_then(|b| b.as_array())
+            .and_then(|b| b.iter().filter_map(|x| x.as_f64()).reduce(f64::max))
+            .filter(|b| *b > 0.0),
         device: v
             .get("cpu")
             .and_then(|c| c.get("brand"))
             .and_then(|b| b.as_str())
             .map(|s| s.trim().to_string()),
     })
+}
+
+/// Difficulty of a submitted share: cpuminer-opt "1 Submitted Diff 0.0234, Block ..."
+/// or gpu-miner "Submitting share diff 12.3 (target 10000)".
+fn share_diff_of(line: &str) -> Option<f64> {
+    let rest = if let Some(i) = line.find("Submitted Diff ") {
+        &line[i + "Submitted Diff ".len()..]
+    } else if let Some(r) = line.strip_prefix("Submitting share diff ") {
+        r
+    } else {
+        return None;
+    };
+    rest.split([',', ' ']).next()?.parse().ok()
 }
 
 fn field_after<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -219,6 +277,8 @@ pub struct ApiSummary {
     pub temp: Option<f64>,
     /// Device name (gpu-miner sends GPU=...).
     pub device: Option<String>,
+    /// Best share difficulty since start (XMRig results.best).
+    pub best_share: Option<f64>,
 }
 
 pub fn parse_api_summary(reply: &str) -> Option<ApiSummary> {
@@ -244,6 +304,7 @@ pub fn parse_api_summary(reply: &str) -> Option<ApiSummary> {
         uptime_secs: map.get("UPTIME").and_then(|v| v.parse().ok()),
         temp: map.get("TEMP").and_then(|v| v.parse().ok()),
         device: map.get("GPU").map(|v| v.to_string()),
+        best_share: None,
     })
 }
 
@@ -320,6 +381,31 @@ mod tests {
         assert_eq!(st.netdiff, Some(1.4836e14));
         assert_eq!(st.last_job.as_deref(), Some("6af4689e00001b80"));
         assert!(!st.stalled_now, "new work clears the stall flag");
+    }
+
+    #[test]
+    fn shares_jobs_and_blocks() {
+        let mut st = LogState::default();
+        st.feed("[2026-11-18 10:00:00] New Stratum Diff 10000, Block 975715, Tx 12, Job 6af4");
+        st.feed("[2026-11-18 10:00:01] New Work: Block 975715, Tx 12, Netdiff 1.4836e+014, Job 6af5");
+        st.feed("[2026-11-18 10:00:02] New Block 975716, Tx 1, Netdiff 1.4836e+014, Job 6af6");
+        assert_eq!(st.jobs, 3);
+        assert!(st.last_job_unix.is_some());
+        st.feed("[2026-11-18 10:01:00] 1 Submitted Diff 12345, Block 975716, Job 6af6");
+        st.feed("[2026-11-18 10:02:00] 2 Submitted Diff 1.5e+04, Block 975716, Job 6af6");
+        st.feed("[2026-11-18 10:03:00] 3 Submitted Diff 10001, Block 975716, Job 6af6");
+        assert_eq!(st.last_share_diff, Some(10001.0));
+        assert_eq!(st.best_share_diff, Some(15000.0));
+        st.feed("[2026-11-18 10:04:00] Submitting share diff 22000.5 (target 10000)");
+        assert_eq!(st.best_share_diff, Some(22000.5));
+        st.feed("[2026-11-18 10:05:00] BLOCK CANDIDATE: share diff 2e14 >= network 1.4e14, hash 00");
+        st.feed("[2026-11-18 10:05:00] 1 BLOCK SOLVED 975716");
+        assert_eq!(st.blocks_found, 2);
+        // gpu-miner's diff-only line carries no job.
+        st.feed("[2026-11-18 10:06:00] New Stratum Diff 10000, Job -");
+        assert_eq!(st.jobs, 3);
+        st.feed("[2026-11-18 10:06:01] net      new job from pool.supportxmr.com:443 diff 120001 algo rx/0 height 3500000");
+        assert_eq!(st.jobs, 4);
     }
 
     #[test]
