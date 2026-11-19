@@ -2,7 +2,8 @@ apiVersion: 1
 
 # Discord channel for Lottery Miner alerts only (webhook in .env as
 # LM_DISCORD_WEBHOOK, passed to the grafana container). The block-found rule
-# routes here directly, so other alerts keep their own setup.
+# routes here directly, so other alerts keep their own setup. Each message
+# mentions the owner's Discord user id.
 contactPoints:
   - orgId: 1
     name: discord-lottery-miner
@@ -12,4 +13,6 @@ contactPoints:
         settings:
           url: ${LM_DISCORD_WEBHOOK}
           use_discord_username: true
+          # Mention the owner so a block pings their phone.
+          message: '<@712982476603129957> {{ template "default.message" . }}'
         disableResolveMessage: true
