@@ -927,7 +927,7 @@ impl Dashboard {
                     let short = net
                         .difficulty
                         .and_then(|d| odds::times_short(d, b))
-                        .map(|n| format!(", {n:.1e} times short"))
+                        .map(|n| format!(", {} times short", fmt_count(n)))
                         .unwrap_or_default();
                     c = c.child(kv("Best share", format!("{b:.0}{short}")));
                 }
@@ -991,7 +991,7 @@ impl Dashboard {
         let best_text = |b: f64| {
             let short = net_diff
                 .and_then(|d| odds::times_short(d, b))
-                .map(|n| format!(", {n:.1e} times short"))
+                .map(|n| format!(", {} times short", fmt_count(n)))
                 .unwrap_or_default();
             format!("{}{short}", fmt_count(b))
         };
