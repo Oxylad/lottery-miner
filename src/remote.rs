@@ -14,7 +14,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Only fixed commands; no user text is interpolated.
 /// Reports cpuminer and xmrig, then details for the selected unit: xmrig if it is
 /// enabled or running (the app switched the server to Monero), else cpuminer.
-const PROBE: &str = "systemctl is-active cpuminer; echo ---XMRIG; systemctl is-active xmrig; U=cpuminer; systemctl is-enabled --quiet xmrig && U=xmrig; systemctl is-active --quiet xmrig && U=xmrig; echo ---UNIT; echo $U; echo ---SHOW; systemctl show $U -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u $U -o short-unix -n 300; echo ---NODE; curl -s -m 5 http://127.0.0.1:18081/get_info 2>/dev/null; echo; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
+const PROBE: &str = "systemctl is-active cpuminer; echo ---XMRIG; systemctl is-active xmrig; U=cpuminer; systemctl is-enabled --quiet xmrig && U=xmrig; systemctl is-active --quiet xmrig && U=xmrig; echo ---UNIT; echo $U; echo ---SHOW; systemctl show $U -p ActiveEnterTimestamp -p NRestarts -p LoadState; echo ---LOG; sudo -n journalctl -u $U -o short-unix -n 300; echo ---NODE; curl -s -m 5 http://127.0.0.1:18081/get_info 2>/dev/null; echo; echo ---XMRAPI; curl -s -m 3 http://127.0.0.1:4071/2/summary 2>/dev/null; echo; echo ---TEMP; sensors | grep Package; echo ---ENERGY; E1=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); sleep 10; E2=$(sudo -n cat /sys/class/powercap/intel-rapl:0/energy_uj); echo $E1 $E2";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OxyhomeStats {
@@ -29,6 +29,10 @@ pub struct OxyhomeStats {
     pub temp_c: Option<f64>,
     /// Monero node (monerod) status, if one runs on the server.
     pub node: Option<NodeStatus>,
+    /// XMRig's HTTP API on the server (best share, pool target), when it runs.
+    pub xmrig: Option<parse::ApiSummary>,
+    /// Journal time of the latest accepted share in the log tail (unix s).
+    pub last_share_unix: Option<f64>,
     /// Journal lines as (unix time, message), oldest first.
     pub journal: Vec<(f64, String)>,
     pub watts: Option<f64>,
@@ -251,7 +255,14 @@ pub fn parse_probe(text: &str) -> OxyhomeStats {
         }
     }
     stats.log = parse::parse_journal(&messages.join("\n"));
+    stats.last_share_unix = stats
+        .journal
+        .iter()
+        .rev()
+        .find(|(_, m)| m.contains(" accepted (") || m.contains("Submitted Diff "))
+        .map(|(ts, _)| *ts);
     stats.node = parts.get("NODE").and_then(|v| parse_node_info(&v.join("\n")));
+    stats.xmrig = parts.get("XMRAPI").and_then(|v| parse::parse_xmrig_summary(v.join("\n").trim()));
     let temp_text = parts.get("TEMP").map(|v| v.join("\n")).unwrap_or_default();
     stats.temp_c = parse::parse_package_temp(&temp_text);
     if let Some(energy) = parts.get("ENERGY").and_then(|v| v.first()) {
@@ -307,6 +318,24 @@ pub fn switch_coin(target: &SshTarget, coin: Coin, monero: &MoneroSettings) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_reads_server_xmrig_api_and_last_share_time() {
+        let out = concat!(
+            "active\n---XMRIG\nactive\n---UNIT\nxmrig\n---SHOW\nLoadState=loaded\n---LOG\n",
+            "1795117709.838706 oxyhome xmrig[1]: [2026-11-19 19:48:29.838]  net      new job from pool.supportxmr.com:443 diff 75000 algo rx/0 height 3810024\n",
+            "1795117710.947698 oxyhome xmrig[1]: [2026-11-19 19:48:30.947]  cpu      accepted (6710/0) diff 75000 (12 ms)\n",
+            "---NODE\n\n---XMRAPI\n",
+            r#"{"uptime":9,"results":{"diff_current":75000,"shares_good":3,"shares_total":3,"best":[1728379463,5000,0]},"hashrate":{"total":[2264.1,null,null]}}"#,
+            "\n\n---TEMP\n---ENERGY\n",
+        );
+        let s = parse_probe(out);
+        let x = s.xmrig.expect("xmrig api");
+        assert_eq!(x.best_share, Some(1728379463.0));
+        assert_eq!(x.difficulty, Some(75000.0));
+        assert!((s.last_share_unix.unwrap() - 1795117710.947698).abs() < 1e-3);
+        assert!(parse_probe("active\n---XMRAPI\n\n---TEMP\n").xmrig.is_none());
+    }
 
     const PROBE_OUT: &str = "active
 ---SHOW

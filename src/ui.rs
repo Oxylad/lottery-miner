@@ -68,6 +68,25 @@ fn fmt_hr(hs: Option<f64>) -> String {
     hs.filter(|h| *h > 0.0).map(odds::format_hashrate).unwrap_or_else(|| "-".into())
 }
 
+/// Share difficulties and counts: "75,000", "1.73 G".
+fn fmt_count(v: f64) -> String {
+    for (div, suffix) in [(1e15, "P"), (1e12, "T"), (1e9, "G"), (1e6, "M")] {
+        if v >= div {
+            return format!("{:.2} {suffix}", v / div);
+        }
+    }
+    let n = v.round() as u64;
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Thousands separators, no decimals: "EUR 181,923".
 fn fmt_eur(v: f64) -> String {
     let s = (v.round() as i64).abs().to_string();
@@ -938,6 +957,9 @@ impl Dashboard {
         .child(kv("This PC", fmt_hr(Some(local))))
         .child(kv(self.server_name(), fmt_hr(oxy)))
         .child(kv("Total", fmt_hr(Some(total))));
+        c = c.child(divider());
+        c = self.monero_shares(c);
+        c = c.child(divider());
         match &self.xmr_net {
             None => c = c.child(note("Loading Monero network numbers...", MUTED)),
             Some(Err(e)) => c = c.child(note(format!("Monero stats: {e}"), ERROR)),
@@ -948,7 +970,6 @@ impl Dashboard {
                         .child(kv("Expected per day", format!("{d:.5} XMR = EUR {:.2}", d * eur)))
                         .child(kv("Expected per year", format!("{:.3} XMR = EUR {:.0}", d * 365.0, d * 365.0 * eur)));
                 }
-                c = c.child(divider());
                 if let Some(h) = n.hashrate {
                     c = c.child(kv("Network", odds::format_hashrate(h)));
                 }
@@ -961,6 +982,74 @@ impl Dashboard {
             }
         }
         c.into_any_element()
+    }
+
+    /// Share stats for the Monero card, like the Bitcoin card's: this PC's XMRig
+    /// (when the CPUs are on Monero), the home server's XMRig, then SupportXMR.
+    fn monero_shares(&self, mut c: gpui::Div) -> gpui::Div {
+        let net_diff = self.xmr_net.as_ref().and_then(|r| r.as_ref().ok()).and_then(|n| n.difficulty);
+        let best_text = |b: f64| {
+            let short = net_diff
+                .and_then(|d| odds::times_short(d, b))
+                .map(|n| format!(", {n:.1e} times short"))
+                .unwrap_or_default();
+            format!("{}{short}", fmt_count(b))
+        };
+        let every = |target: Option<f64>, hs: f64| {
+            target
+                .filter(|t| *t > 0.0 && hs > 0.0)
+                .map(|t| format!("about every {}", fmt_duration(Duration::from_secs_f64(t / hs))))
+        };
+        let mut any = false;
+
+        if self.miner.is_running() && self.cpu_coin == Coin::Monero {
+            let best = self.local.iter().filter_map(|v| v.best_share_diff).reduce(f64::max);
+            let last = self.local.iter().filter_map(|v| v.last_share_unix).reduce(f64::max);
+            let target = self.local.iter().find_map(|v| v.pool_diff);
+            if let Some(e) = every(target, self.cpu_hashrate()) {
+                c = c.child(kv("Pool share (this PC)", e));
+            }
+            if let Some(b) = best {
+                c = c.child(kv("Best share (this PC)", best_text(b)));
+            }
+            c = c.child(kv("Last share (this PC)", last.map(|t| fmt_ago(t as i64)).unwrap_or_else(|| "none yet".into())));
+            any = true;
+        }
+
+        if let Some(Ok(s)) = &self.oxyhome {
+            if s.unit == "xmrig" && s.service_active {
+                let name = self.server_name();
+                let target = s.xmrig.as_ref().and_then(|x| x.difficulty).or(s.log.difficulty);
+                let hs = s.xmrig.as_ref().map(|x| x.hashrate).or(s.log.hashrate).unwrap_or(0.0);
+                if let Some(e) = every(target, hs) {
+                    c = c.child(kv(format!("Pool share ({name})"), e));
+                }
+                if let Some(b) = s.xmrig.as_ref().and_then(|x| x.best_share) {
+                    c = c.child(kv(format!("Best share ({name})"), best_text(b)));
+                }
+                if let Some(t) = s.last_share_unix {
+                    c = c.child(kv(format!("Last share ({name})"), fmt_ago(t as i64)));
+                }
+                any = true;
+            }
+        }
+
+        match &self.xmr_pool {
+            Some(Ok(Some(p))) => {
+                c = c.child(kv(
+                    "SupportXMR shares",
+                    format!("{} valid / {} invalid", fmt_count(p.valid_shares as f64), p.invalid_shares),
+                ));
+                if let Some(t) = p.last_share_unix {
+                    c = c.child(kv("SupportXMR last share", fmt_ago(t)));
+                }
+                c = c.child(kv("Pending payout", format!("{:.6} XMR", p.due_xmr)));
+            }
+            Some(Err(e)) => c = c.child(note(format!("SupportXMR: {e}"), ERROR)),
+            _ if !any => c = c.child(note("No Monero miner running.", MUTED)),
+            _ => {}
+        }
+        c
     }
 
     // -------------------------------------------------------------- settings
