@@ -180,6 +180,13 @@ impl LogState {
                     }
                 }
             }
+            // XMRig logs the difficulty the pool credits (its target), not the
+            // share's real one; the real best comes from its HTTP API.
+            if rest.starts_with(" accepted (") {
+                if let Some(d) = field_after(rest, ") diff ").and_then(|d| d.parse().ok()) {
+                    self.share_seen(d);
+                }
+            }
             return true;
         }
         if line.contains("new job from ") {
@@ -450,6 +457,10 @@ mod tests {
         assert_eq!(st.hashrate, Some(16234.5));
         assert_eq!(st.accepted, 3);
         assert_eq!(st.rejected(), 1);
+        assert_eq!(st.last_share_diff, Some(120001.0));
+        assert!(st.last_share_unix.is_some());
+        st.feed("[2026-11-16 17:02:30.000]  cpu      rejected (3/2) diff 150000 \"Low difficulty share\" (40 ms)");
+        assert_eq!(st.last_share_diff, Some(120001.0));
         // Speed not measured yet leaves the old value alone.
         st.feed("[2026-11-16 17:03:00.000]  miner    speed 10s/60s/15m n/a n/a n/a H/s max n/a H/s");
         assert_eq!(st.hashrate, Some(16234.5));

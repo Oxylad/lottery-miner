@@ -1053,7 +1053,7 @@ fn write_process(w: &mut crate::metrics::Writer, coin: &str, miner: &str, v: &In
     w.counter("lm_stratum_resets_total", "Stratum reconnects.", &l, v.stratum_resets as f64);
     w.counter("lm_blocks_found_total", "Shares at or above network difficulty (blocks).", &l, v.blocks_found as f64);
     w.gauge_opt("lm_share_target_difficulty", "Share difficulty the pool asks for.", &l, v.pool_diff);
-    w.gauge_opt("lm_share_last_difficulty", "Real difficulty of the latest submitted share.", &l, v.last_share_diff);
+    w.gauge_opt("lm_share_last_difficulty", "Difficulty of the latest share (XMRig logs the difficulty the pool credits).", &l, v.last_share_diff);
     w.gauge_opt("lm_share_best_difficulty", "Best share difficulty since the miner started.", &l, v.best_share_diff);
     w.gauge_opt("lm_share_last_timestamp_seconds", "When the latest share was submitted (unix s).", &l, v.last_share_unix);
     w.gauge_opt("lm_job_block_height", "Block height of the current job.", &l, v.block.map(|b| b as f64));

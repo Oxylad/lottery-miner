@@ -103,7 +103,7 @@ pub fn fetch_xmr_pool(pool: &str, address: &str) -> Result<Option<XmrPool>, Stri
     if !pool.contains("supportxmr.com") || address.trim().is_empty() {
         return Ok(None);
     }
-    let url = format!("https://supportxmr.com/api/miner/{}/stats", address.trim());
+    let url = format!("https://www.supportxmr.com/api/miner/{}/stats", address.trim());
     Ok(remote::get_json(&url)?.as_ref().and_then(parse_xmr_pool))
 }
 

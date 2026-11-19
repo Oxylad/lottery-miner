@@ -199,15 +199,37 @@ p = series("Bitcoin: best vs latest share (log)", [
     desc="Share difficulty on a log scale. A share at the network difficulty line is a block.")
 p["fieldConfig"]["overrides"] = [color_override("network.*", "red")]
 panels.append(p)
-p = series("Monero: best share vs pool target (log)", [
-    target('max by (instance) (lm_share_best_difficulty{coin="xmr"})', "best {{instance}}"),
-    target('max by (instance) (lm_share_target_difficulty{coin="xmr"})', "pool target {{instance}}", ref="B"),
-    target('max(lm_network_difficulty{coin="xmr"})', "network difficulty (a block)", ref="C"),
+p = series("Monero: best vs latest share (log)", [
+    target('max by (instance, miner) %s' % fresh('lm_share_best_difficulty{coin="xmr"}'), "best {{instance}} {{miner}}"),
+    target('max by (instance, miner) %s' % fresh('lm_share_last_difficulty{coin="xmr"}'), "latest {{instance}} {{miner}}", ref="B"),
+    target('max by (instance, miner) %s' % fresh('lm_share_target_difficulty{coin="xmr"}'), "pool target {{instance}} {{miner}}", ref="C"),
+    target('max(lm_network_difficulty{coin="xmr"})', "network difficulty (a block)", ref="D"),
 ], 12, h=10, log=True, points=True,
-    desc="XMRig keeps its best share since start. Shares are sent at the pool target.")
+    desc="Best = XMRig's best real share since it started (its API). Latest = the difficulty the pool credited for the "
+         "last accepted share (XMRig logs that, not the real one). A share at the network line would be a Monero block.")
 p["fieldConfig"]["overrides"] = [color_override("network.*", "red")]
 panels.append(p)
 advance(10)
+
+
+def share_stats(coin, color, x):
+    best = 'max(%s)' % fresh('lm_share_best_difficulty{coin="%s"}' % coin)
+    net = 'scalar(max(lm_network_difficulty{coin="%s"}))' % coin
+    name = {"btc": "BTC", "xmr": "XMR"}[coin]
+    return [
+        stat("Best %s share" % name, best, x, w=3, unit="short", color=color,
+             desc="Best share difficulty of the running miners."),
+        stat("Best %s share vs network" % name, "%s / %s" % (best, net), x + 3, w=3, unit="percentunit", decimals=8,
+             color="purple", desc="100% = a block."),
+        stat("%s shares / hour" % name, 'sum(increase(lm_shares_total{coin="%s",result="accepted"}[1h]))' % coin,
+             x + 6, w=3, unit="short", decimals=0, color=color, desc="Accepted shares in the last hour, all miners."),
+        stat("Last %s share" % name, 'time() - max(lm_share_last_timestamp_seconds{coin="%s"})' % coin, x + 9, w=3,
+             unit="dtdurations", color=color, desc="Time since the latest share any miner submitted."),
+    ]
+
+
+panels += share_stats("btc", BTC, 0) + share_stats("xmr", XMR, 12)
+advance(4)
 panels.append(series("Accepted shares per hour", [
     target('sum by (instance, miner) (increase(lm_shares_total{result="accepted"}[1h]))', "{{instance}} {{miner}}"),
 ], 0, w=8, bars=True, min0=True))

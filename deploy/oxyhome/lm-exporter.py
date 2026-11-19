@@ -61,6 +61,15 @@ class MinerLog:
                 if a.strip().isdigit() and r.strip().isdigit():
                     self.accepted = int(a)
                     self.submitted = int(a) + int(r)
+            # The difficulty the pool credits (its target), not the real one;
+            # the real best comes from the XMRig API.
+            if " accepted (" in line:
+                d = _num(_after(line, ") diff "))
+                if d is not None:
+                    self.last_share_diff = d
+                    self.last_share_ts = ts
+                    if self.best_share_diff is None or d > self.best_share_diff:
+                        self.best_share_diff = d
             return
         if "new job from " in line:
             self._job(ts, live)
@@ -346,7 +355,7 @@ def collect():
             w.counter("lm_stalls_total", "Times the miner ran out of nonces.", lab, st.stalls)
             w.counter("lm_blocks_found_total", "Shares at or above network difficulty (blocks).", lab, st.blocks_found)
             w.gauge("lm_share_target_difficulty", "Share difficulty the pool asks for.", lab, _num(target))
-            w.gauge("lm_share_last_difficulty", "Real difficulty of the latest submitted share.", lab, st.last_share_diff)
+            w.gauge("lm_share_last_difficulty", "Difficulty of the latest share (XMRig logs the difficulty the pool credits).", lab, st.last_share_diff)
             w.gauge("lm_share_best_difficulty", "Best share difficulty since the miner started.", lab, best)
             w.gauge("lm_share_last_timestamp_seconds", "When the latest share was submitted (unix s).", lab, st.last_share_ts)
             w.gauge("lm_job_block_height", "Block height of the current job.", lab, st.block)
