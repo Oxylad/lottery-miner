@@ -20,8 +20,8 @@ def fresh(sel):
     return "(%s%s)" % (sel, STALE)
 
 
-BTC_HR = "sum(%s)" % fresh('lm_hashrate_hps{coin="btc"}')
-XMR_HR = "sum(%s)" % fresh('lm_hashrate_hps{coin="xmr"}')
+BTC_HR = "(sum(%s) or vector(0))" % fresh('lm_hashrate_hps{coin="btc"}')
+XMR_HR = "(sum(%s) or vector(0))" % fresh('lm_hashrate_hps{coin="xmr"}')
 BTC_DIFF = 'scalar(max(lm_network_difficulty{coin="btc"}))'
 # Expected Bitcoin blocks per second at our hashrate.
 BTC_BLOCKS_PER_SEC = "(%s / (%s * %s))" % (BTC_HR, BTC_DIFF, TWO32)
@@ -66,7 +66,7 @@ def panel(kind, title, targets, x, w, h, unit=None, desc=None, **extra):
     return p
 
 
-def stat(title, expr, x, w=4, h=4, unit=None, desc=None, color=None, decimals=None, mappings=None, thresholds=None, legend=""):
+def stat(title, expr, x, w=4, h=4, unit=None, desc=None, color=None, decimals=None, mappings=None, thresholds=None, legend="", no_value=None):
     p = panel("stat", title, [target(expr, legend, instant=True)], x, w, h, unit, desc)
     d = p["fieldConfig"]["defaults"]
     d["color"] = {"mode": "fixed", "fixedColor": color} if color else {"mode": "thresholds"}
@@ -76,6 +76,8 @@ def stat(title, expr, x, w=4, h=4, unit=None, desc=None, color=None, decimals=No
         d["decimals"] = decimals
     if mappings:
         d["mappings"] = mappings
+    if no_value:
+        d["noValue"] = no_value
     p["options"] = {
         "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
         "colorMode": "value",
@@ -144,7 +146,8 @@ panels += [
     stat("Monero hashrate", XMR_HR, 4, unit="Hs", color=XMR, desc="XMRig on the desktop and oxyhome."),
     stat("Solo block chance / year", "1 - exp(-%s * 31557600)" % BTC_BLOCKS_PER_SEC, 8, unit="percentunit", decimals=6,
          color="purple", desc="Poisson chance of finding at least one Bitcoin block in a year at the current combined hashrate."),
-    stat("Expected time to a block", "1 / %s" % BTC_BLOCKS_PER_SEC, 12, unit="dtdurations", color="purple",
+    stat("Expected time to a block", "1 / (%s > 0)" % BTC_BLOCKS_PER_SEC, 12, unit="dtdurations", color="purple",
+         no_value="not mining Bitcoin",
          desc="Average waiting time for one Bitcoin block at the current hashrate (network difficulty x 2^32 / hashrate)."),
     stat("Solo block prize", 'max(lm_solo_prize_eur{coin="btc"})', 16, unit="currencyEUR", color="green",
          desc="Subsidy + average fees, minus the 2% ckpool fee."),
@@ -170,7 +173,8 @@ advance(4)
 # ---------------------------------------------------------------- hashrate
 panels.append(row("Hashrate"))
 p = series("Bitcoin hashrate by miner",
-           [target("sum by (instance, miner) %s" % fresh('lm_hashrate_hps{coin="btc"}'), "{{instance}} {{miner}}")],
+           [target("sum by (instance, miner) %s" % fresh('lm_hashrate_hps{coin="btc"}'), "{{instance}} {{miner}}"),
+            target("vector(0) unless on() %s" % BTC_HR.replace(" or vector(0)", ""), "nothing on Bitcoin", ref="B")],
            0, unit="Hs", stack=True)
 panels.append(p)
 p = series("Monero hashrate by miner",
@@ -213,18 +217,21 @@ advance(10)
 
 
 def share_stats(coin, color, x):
-    best = 'max(%s)' % fresh('lm_share_best_difficulty{coin="%s"}' % coin)
+    # Over 30 days, so the numbers stay when nothing mines this coin right now.
+    best = 'max(max_over_time(lm_share_best_difficulty{coin="%s"}[30d]))' % coin
     net = 'scalar(max(lm_network_difficulty{coin="%s"}))' % coin
     name = {"btc": "BTC", "xmr": "XMR"}[coin]
+    none = "no share in 30 days"
     return [
-        stat("Best %s share" % name, best, x, w=3, unit="short", color=color,
-             desc="Best share difficulty of the running miners."),
+        stat("Best %s share (30 days)" % name, best, x, w=3, unit="short", color=color, no_value=none,
+             desc="Best share difficulty any miner reported in the last 30 days."),
         stat("Best %s share vs network" % name, "%s / %s" % (best, net), x + 3, w=3, unit="percentunit", decimals=8,
-             color="purple", desc="100% = a block."),
-        stat("%s shares / hour" % name, 'sum(increase(lm_shares_total{coin="%s",result="accepted"}[1h]))' % coin,
+             color="purple", no_value=none, desc="Best share of the last 30 days against today's network difficulty. 100% = a block."),
+        stat("%s shares / hour" % name, 'sum(increase(lm_shares_total{coin="%s",result="accepted"}[1h])) or vector(0)' % coin,
              x + 6, w=3, unit="short", decimals=0, color=color, desc="Accepted shares in the last hour, all miners."),
-        stat("Last %s share" % name, 'time() - max(lm_share_last_timestamp_seconds{coin="%s"})' % coin, x + 9, w=3,
-             unit="dtdurations", color=color, desc="Time since the latest share any miner submitted."),
+        stat("Last %s share" % name, 'time() - max(max_over_time(lm_share_last_timestamp_seconds{coin="%s"}[30d]))' % coin,
+             x + 9, w=3, unit="dtdurations", color=color, no_value=none,
+             desc="Time since the latest share any miner submitted (last 30 days)."),
     ]
 
 
@@ -249,7 +256,8 @@ panels += [
     stat("BTC block chance / day", "1 - exp(-%s * 86400)" % BTC_BLOCKS_PER_SEC, 0, unit="percentunit", decimals=8, color="purple"),
     stat("BTC block chance / week", "1 - exp(-%s * 604800)" % BTC_BLOCKS_PER_SEC, 4, unit="percentunit", decimals=7, color="purple"),
     stat("BTC block chance / year", "1 - exp(-%s * 31557600)" % BTC_BLOCKS_PER_SEC, 8, unit="percentunit", decimals=6, color="purple"),
-    stat("Odds per year (1 in N)", "1 / (%s * 31557600)" % BTC_BLOCKS_PER_SEC, 12, unit="short", color="purple"),
+    stat("Odds per year (1 in N)", "1 / ((%s * 31557600) > 0)" % BTC_BLOCKS_PER_SEC, 12, unit="short", color="purple",
+         no_value="not mining Bitcoin"),
     stat("XMR solo block chance / day", "1 - exp(-%s / scalar(max(lm_network_hashrate_hps{coin=\"xmr\"})) * 720)" % XMR_HR, 16,
          unit="percentunit", decimals=6, color=XMR, desc="If Monero were mined solo instead of on SupportXMR."),
     stat("SupportXMR paid", 'max(lm_pool_balance_coins{coin="xmr",state="paid"})', 20, unit="none", decimals=6, color=XMR),
