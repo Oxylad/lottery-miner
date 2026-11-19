@@ -68,9 +68,9 @@ fn fmt_hr(hs: Option<f64>) -> String {
     hs.filter(|h| *h > 0.0).map(odds::format_hashrate).unwrap_or_else(|| "-".into())
 }
 
-/// Share difficulties and counts: "75,000", "1.73 G".
+/// Share difficulties and counts: "75,000", "1.73 billion".
 fn fmt_count(v: f64) -> String {
-    for (div, suffix) in [(1e15, "P"), (1e12, "T"), (1e9, "G"), (1e6, "M")] {
+    for (div, suffix) in [(1e15, "quadrillion"), (1e12, "trillion"), (1e9, "billion"), (1e6, "million")] {
         if v >= div {
             return format!("{:.2} {suffix}", v / div);
         }
