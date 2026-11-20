@@ -98,6 +98,14 @@ pub struct MoneroSettings {
     /// host:port of the pool (TLS).
     pub pool: String,
     pub tls: bool,
+    /// Solo mining: XMRig mines on the home server's solo stratum
+    /// (deploy/oxyhome/xmr-solo-stratum.py) in front of its own monerod. It
+    /// hands out easy shares for stats; a block pays the whole reward to the
+    /// stratum's wallet, which must be a main address (starts with 4).
+    pub solo: bool,
+    /// host:port of that stratum for this PC. The home server's own XMRig
+    /// always uses 127.0.0.1 with the same port.
+    pub solo_pool: String,
     /// Rig name sent to the pool (password field).
     pub worker: String,
     /// CPU threads for XMRig on this PC; 0 = XMRig decides.
@@ -113,6 +121,8 @@ impl Default for MoneroSettings {
             address: String::new(),
             pool: "pool.supportxmr.com:443".to_string(),
             tls: true,
+            solo: false,
+            solo_pool: "oxyhome.local:3340".to_string(),
             worker: "desktop".to_string(),
             threads: 0,
             api_port: 4070,
@@ -129,6 +139,37 @@ pub fn is_monero_address(s: &str) -> bool {
     len_ok && s.chars().all(|c| B58.contains(c))
 }
 
+/// Standard address (95 chars, starts with 4): the only kind monerod accepts
+/// as the coinbase destination for solo mining.
+pub fn is_standard_monero_address(s: &str) -> bool {
+    s.len() == 95 && s.starts_with('4') && is_monero_address(s)
+}
+
+/// Checks the Monero settings needed before XMRig can start (here or on the
+/// home server). Returns the message to show otherwise.
+pub fn monero_ready(m: &MoneroSettings) -> Result<(), String> {
+    let addr = m.address.trim();
+    if !is_monero_address(addr) {
+        return Err("Set a valid Monero address in Settings first.".into());
+    }
+    if m.solo {
+        if !is_standard_monero_address(addr) {
+            return Err("Solo mining needs your wallet's main address (starts with 4), not a subaddress (starts with 8).".into());
+        }
+        if !is_pool_host_port(m.solo_pool.trim()) {
+            return Err(format!("Solo stratum \"{}\" must be host:port", m.solo_pool.trim()));
+        }
+        return Ok(());
+    }
+    if let Some(hint) = monero_node_port_hint(&m.pool) {
+        return Err(hint.to_string());
+    }
+    if !is_pool_host_port(m.pool.trim()) {
+        return Err(format!("Monero pool \"{}\" must be host:port", m.pool.trim()));
+    }
+    Ok(())
+}
+
 /// "host:port" with a plain hostname, for the Monero pool field.
 pub fn is_pool_host_port(s: &str) -> bool {
     let Some((host, port)) = s.rsplit_once(':') else { return false };
@@ -143,7 +184,7 @@ pub fn is_pool_host_port(s: &str) -> bool {
 pub fn monero_node_port_hint(pool: &str) -> Option<&'static str> {
     let port = pool.trim().rsplit_once(':')?.1.parse::<u16>().ok()?;
     matches!(port, 18080 | 18081 | 18089).then_some(
-        "That is a Monero node port, not a mining pool. Use a pool such as pool.supportxmr.com:443 (or P2Pool on port 3333 once it is set up).",
+        "That is a Monero node port, not a mining pool. For your own node, turn on Solo mining instead.",
     )
 }
 

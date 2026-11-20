@@ -351,7 +351,7 @@ impl Dashboard {
         }
 
         // SupportXMR (Monero).
-        if self.settings.monero.pool.contains("supportxmr.com") {
+        if !self.settings.monero.solo && self.settings.monero.pool.contains("supportxmr.com") {
             w.gauge("lm_source_up", "Last fetch from this data source worked.", &[("source", "supportxmr")], b(matches!(&self.xmr_pool, Some(Ok(_)))));
         }
         if let Some(Ok(Some(x))) = &self.xmr_pool {
@@ -763,6 +763,10 @@ impl Dashboard {
             self.message = Some("That is not a valid Monero address (95 or 106 characters, starts with 4 or 8).".into());
             return;
         }
+        if self.settings.monero.solo && !address.is_empty() && !settings::is_standard_monero_address(&address) {
+            self.message = Some("Solo mining needs your wallet's main address (starts with 4), not a subaddress.".into());
+            return;
+        }
         if let Some(hint) = settings::monero_node_port_hint(&pool) {
             self.message = Some(hint.to_string());
             return;
@@ -962,7 +966,8 @@ impl Dashboard {
                         d.network_due = now + NETWORK_EVERY;
                         Some((
                             d.settings.address.clone(),
-                            d.settings.monero.pool.clone(),
+                            // Solo: no pool to ask (empty skips SupportXMR).
+                            if d.settings.monero.solo { String::new() } else { d.settings.monero.pool.clone() },
                             d.settings.monero.address.clone(),
                         ))
                     } else {

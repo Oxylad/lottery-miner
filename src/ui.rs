@@ -231,6 +231,18 @@ fn setting_row(label: &str, hint: Option<&str>, control: AnyElement) -> AnyEleme
         .into_any_element()
 }
 
+/// What to tell the user after the solo switch flips.
+fn settings_change_note(coin: crate::settings::Coin, m: &crate::settings::MoneroSettings) -> Option<String> {
+    if let Err(e) = crate::settings::monero_ready(m) {
+        return Some(e);
+    }
+    Some(match (coin, m.solo) {
+        (crate::settings::Coin::Monero, _) => "Saved. Switch to Bitcoin and back to Monero to apply it on running miners and oxyhome.".into(),
+        (_, true) => "Saved. Monero now mines solo through your node.".into(),
+        (_, false) => "Saved. Monero now mines on the pool.".into(),
+    })
+}
+
 fn toggle_row(
     label: &str,
     hint: Option<&str>,
@@ -700,6 +712,7 @@ impl Dashboard {
         } else {
             match cpu_coin {
                 Coin::Bitcoin => "cpuminer-opt, ckpool solo".into(),
+                Coin::Monero if self.settings.monero.solo => "XMRig, Monero solo".into(),
                 Coin::Monero => "XMRig, Monero pool".into(),
             }
         };
@@ -1022,7 +1035,8 @@ impl Dashboard {
                 let target = s.xmrig.as_ref().and_then(|x| x.difficulty).or(s.log.difficulty);
                 let hs = s.xmrig.as_ref().map(|x| x.hashrate).or(s.log.hashrate).unwrap_or(0.0);
                 if let Some(e) = every(target, hs) {
-                    c = c.child(kv(format!("Pool share ({name})"), e));
+                    let what = if self.settings.monero.solo { "Solo share" } else { "Pool share" };
+                    c = c.child(kv(format!("{what} ({name})"), e));
                 }
                 if let Some(b) = s.xmrig.as_ref().and_then(|x| x.best_share) {
                     c = c.child(kv(format!("Best share ({name})"), best_text(b)));
@@ -1143,7 +1157,23 @@ impl Dashboard {
                 ),
             ))
             .child(field("Monero address", f.xmr_address.clone(), "Payouts go here; needed before switching to Monero"))
-            .child(field("Pool (TLS)", f.xmr_pool.clone(), "host:port, also used by the home server"))
+            .child(toggle_row(
+                "Solo mining (own node)",
+                Some(if s.monero.solo {
+                    "Your node via the home server's solo stratum: shares for stats, a block pays the whole reward"
+                } else {
+                    "Off: mine on the pool below for small steady payouts"
+                }),
+                s.monero.solo,
+                cx,
+                |d, _| {
+                    let m = &mut d.settings.monero;
+                    m.solo = !m.solo;
+                    d.message = settings_change_note(d.settings.coin, &d.settings.monero);
+                    d.save_settings();
+                },
+            ))
+            .child(field("Pool (TLS)", f.xmr_pool.clone(), "host:port when solo is off, also used by the home server"))
             .child(field("XMRig executable", f.xmrig_exe.clone(), "Empty: tools\\xmrig\\xmrig.exe or next to this app"))
             .child(save_row("Save", cx, |d, cx| d.apply_monero_form(cx)));
 

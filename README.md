@@ -6,6 +6,10 @@ Windows tray app (Rust, GPUI + tray-icon) that runs a solo Bitcoin CPU miner
 (cpuminer-opt) on this PC and watches/controls a second miner on a home
 server over SSH.
 
+This is a personal project, built for my own machines and setup. It isn't
+meant for anyone else to use, so there are no releases, support or
+guarantees that it works elsewhere.
+
 ## What it does
 
 - Starts N cpuminer-opt instances (default 4 x 4 threads, pinned with
@@ -122,6 +126,30 @@ mines Bitcoin; RandomX is a CPU algorithm. Monero goes to a normal pool
 (default `pool.supportxmr.com:443`, TLS): same expected value as solo,
 steady small payouts. Set your Monero address in the Monero card first.
 
+**Solo mining** (Settings > Monero > Solo mining) skips the pool. Both
+XMRigs mine on `xmr-solo-stratum` on the home server
+(`deploy/oxyhome/xmr-solo-stratum.py`, stdlib Python, port 3340), a tiny
+ckpool-style stratum in front of the local monerod:
+
+- Each miner gets its own block template (`get_block_template` with a
+  unique `extra_nonce`) and an easy share target that adjusts so it finds a
+  share about every 30 s. Shares are only stats: best share, share rate,
+  "times short", like the Bitcoin card.
+- A share that beats the network difficulty is a block: the stratum sends it
+  to monerod (`submit_block`) and the whole reward goes to `SOLO_WALLET`.
+  That must be the wallet's main address (starts with 4); monerod refuses
+  subaddresses as the coinbase. The journal logs `BLOCK SOLVED`.
+- Share hashes are not re-checked with RandomX, so only your own miners
+  should reach it: it listens on IPv4 only (the LAN behind NAT).
+- This PC uses `monero.solo_pool` (default `oxyhome.local:3340`), resolved
+  to IPv4 at start because `oxyhome.local` also answers with public IPv6
+  addresses. The home server's XMRig uses 127.0.0.1:3340.
+
+Install on the server: copy the script to
+`/usr/local/lib/xmr-solo-stratum/`, the unit to `/etc/systemd/system/`, put
+`SOLO_WALLET=<main address>` in `/etc/default/xmr-solo-stratum`, then
+`systemctl enable --now xmr-solo-stratum`.
+
 - This PC: XMRig from `tools\xmrig\xmrig.exe` (or next to the app, or the
   path in Settings), idle priority, no window, stats from its local HTTP API
   (127.0.0.1:4070, `/2/summary`). `tools/` is not in git; get XMRig 6.26.0
@@ -131,7 +159,9 @@ steady small payouts. Set your Monero address in the Monero card first.
 - Home server: `xmrig.service` next to `cpuminer.service` (same hardening,
   MemoryMax=3G for the RandomX dataset). Switching runs
   `disable --now` on one unit and `enable --now` on the other, and for Monero
-  first writes `/etc/default/xmrig` (pool, validated address, rig name).
+  first writes `/etc/default/xmrig` (pool, validated address, rig name, and
+  `XMRIG_OPTS`: `--tls` for a pool, empty for the solo stratum; the unit's
+  ExecStart passes `$XMRIG_OPTS` in place of a fixed `--tls`).
   Nothing else on the server is touched.
 - The Monero card estimates XMR and EUR per day/year from your hashrate,
   the network hashrate and block reward (moneroblocks.info) and the XMR price

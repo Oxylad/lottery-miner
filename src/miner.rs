@@ -75,14 +75,21 @@ pub fn xmrig_path(settings: &Settings) -> std::path::PathBuf {
         .unwrap_or_else(|| candidates[2].clone())
 }
 
+/// "host:port" with the host resolved to its first IPv4 address, if it has one.
+fn ipv4_host_port(host_port: &str) -> Option<String> {
+    use std::net::ToSocketAddrs;
+    host_port.to_socket_addrs().ok()?.find(|a| a.is_ipv4()).map(|a| a.to_string())
+}
+
 /// XMRig on this PC: RandomX, lowest CPU priority, local read-only HTTP API.
 pub fn xmrig_command_line(settings: &Settings) -> Vec<String> {
     let m = &settings.monero;
+    let url = if m.solo { m.solo_pool.trim() } else { m.pool.trim() };
     let mut args: Vec<String> = vec![
         "-a".into(),
         "rx/0".into(),
         "-o".into(),
-        m.pool.trim().into(),
+        url.into(),
         "-u".into(),
         m.address.trim().into(),
         "-p".into(),
@@ -100,7 +107,8 @@ pub fn xmrig_command_line(settings: &Settings) -> Vec<String> {
         "--http-port".into(),
         m.api_port.to_string(),
     ];
-    if m.tls {
+    // The solo stratum is plain TCP on the LAN.
+    if m.tls && !m.solo {
         args.push("--tls".into());
     }
     if m.threads > 0 {
@@ -218,20 +226,19 @@ impl Miner {
             return Ok(());
         }
         let m = &settings.monero;
-        if !crate::settings::is_monero_address(m.address.trim()) {
-            return Err("Set a valid Monero address in Settings first.".into());
-        }
-        if let Some(hint) = crate::settings::monero_node_port_hint(&m.pool) {
-            return Err(hint.to_string());
-        }
-        if !crate::settings::is_pool_host_port(m.pool.trim()) {
-            return Err(format!("Monero pool \"{}\" must be host:port", m.pool.trim()));
-        }
+        crate::settings::monero_ready(m)?;
         let exe = xmrig_path(settings);
         if !exe.exists() {
             return Err(format!("XMRig not found at {}", exe.display()));
         }
-        let args = xmrig_command_line(settings);
+        let mut args = xmrig_command_line(settings);
+        if m.solo {
+            // oxyhome.local also answers with public IPv6 addresses the stratum
+            // does not listen on; XMRig tries those and gets refused.
+            if let (Some(i), Some(v4)) = (args.iter().position(|a| a == "-o"), ipv4_host_port(m.solo_pool.trim())) {
+                args[i + 1] = v4;
+            }
+        }
         self.spawn_instance(&exe.display().to_string(), &args, 0, m.api_port, Source::Cpu(0), ApiKind::Xmrig)
     }
 
@@ -569,6 +576,20 @@ mod tests {
         let joined = xmrig_command_line(&s).join(" ");
         assert!(joined.ends_with("-t 12"));
         assert!(!joined.contains("--tls"));
+        // Solo: the home server's stratum, plain TCP.
+        s.monero.tls = true;
+        s.monero.solo = true;
+        let joined = xmrig_command_line(&s).join(" ");
+        assert!(joined.contains("-o oxyhome.local:3340"));
+        assert!(!joined.contains("--daemon"));
+        assert!(!joined.contains("--tls"));
+    }
+
+    #[test]
+    fn solo_node_resolves_to_ipv4() {
+        assert_eq!(ipv4_host_port("127.0.0.1:18089").as_deref(), Some("127.0.0.1:18089"));
+        assert_eq!(ipv4_host_port("localhost:18089").as_deref(), Some("127.0.0.1:18089"));
+        assert!(ipv4_host_port("[::1]:18089").is_none());
     }
 
     #[test]

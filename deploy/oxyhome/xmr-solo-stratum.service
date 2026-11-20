@@ -1,0 +1,22 @@
+[Unit]
+Description=Solo Monero stratum for Lottery Miner (shares from the local monerod)
+After=network-online.target monerod.service
+Wants=network-online.target
+
+[Service]
+# SOLO_WALLET=<main address, starts with 4>; optional SOLO_PORT, SOLO_BIND,
+# SOLO_START_DIFF, SOLO_SHARE_SECS.
+EnvironmentFile=/etc/default/xmr-solo-stratum
+ExecStart=/usr/bin/python3 /usr/local/lib/xmr-solo-stratum/xmr-solo-stratum.py
+Restart=always
+RestartSec=10
+Nice=5
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+MemoryMax=200M
+
+[Install]
+WantedBy=multi-user.target

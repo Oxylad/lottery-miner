@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::parse::{self, LogState};
-use crate::settings::{Coin, MoneroSettings, SshTarget, is_monero_address, is_pool_host_port};
+use crate::settings::{Coin, MoneroSettings, SshTarget};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -290,19 +290,18 @@ pub fn switch_script(coin: Coin, monero: &MoneroSettings) -> Result<String, Stri
             "sudo -n systemctl disable --now xmrig && sudo -n systemctl enable --now cpuminer".into(),
         ),
         Coin::Monero => {
+            crate::settings::monero_ready(monero)?;
             let addr = monero.address.trim();
-            let pool = monero.pool.trim();
-            if !is_monero_address(addr) {
-                return Err("Set a valid Monero address first.".into());
-            }
-            if let Some(hint) = crate::settings::monero_node_port_hint(pool) {
-                return Err(hint.to_string());
-            }
-            if !is_pool_host_port(pool) {
-                return Err(format!("Monero pool \"{pool}\" must be host:port"));
-            }
+            // Solo: the stratum on the server itself (xmr-solo-stratum), same port.
+            let solo_port = monero.solo_pool.trim().rsplit_once(':').map(|(_, p)| p).unwrap_or("3340");
+            let solo_pool = format!("127.0.0.1:{solo_port}");
+            let (pool, opts) = if monero.solo {
+                (solo_pool.as_str(), "''")
+            } else {
+                (monero.pool.trim(), "--tls")
+            };
             Ok(format!(
-                "printf 'XMRIG_POOL=%s\\nXMRIG_USER=%s\\nXMRIG_RIG=oxyhome\\n' {pool} {addr} | sudo -n tee /etc/default/xmrig >/dev/null && sudo -n systemctl disable --now cpuminer && sudo -n systemctl enable --now xmrig"
+                "printf 'XMRIG_POOL=%s\\nXMRIG_USER=%s\\nXMRIG_RIG=oxyhome\\nXMRIG_OPTS=%s\\n' {pool} {addr} {opts} | sudo -n tee /etc/default/xmrig >/dev/null && sudo -n systemctl disable --now cpuminer && sudo -n systemctl enable --now xmrig && sudo -n systemctl restart xmrig"
             ))
         }
     }
@@ -421,7 +420,14 @@ Package id 0:  +61.0°C  (high = +86.0°C, crit = +100.0°C)
         assert!(xmr.contains("XMRIG_POOL=%s"));
         assert!(xmr.contains(&format!("pool.supportxmr.com:443 {}", m.address)));
         assert!(xmr.contains("sudo -n tee /etc/default/xmrig"));
-        assert!(xmr.ends_with("sudo -n systemctl disable --now cpuminer && sudo -n systemctl enable --now xmrig"));
+        assert!(xmr.contains(&format!("pool.supportxmr.com:443 {} --tls", m.address)));
+        assert!(xmr.ends_with("sudo -n systemctl enable --now xmrig && sudo -n systemctl restart xmrig"));
+        m.solo = true;
+        let solo = switch_script(Coin::Monero, &m).unwrap();
+        assert!(solo.contains(&format!("127.0.0.1:3340 {} ''", m.address)));
+        m.address = format!("8{}", "AbCd".repeat(23) + "ef");
+        assert!(switch_script(Coin::Monero, &m).is_err(), "solo needs a main address");
+        m.solo = false;
         m.pool = "evil.example:443;reboot".into();
         assert!(switch_script(Coin::Monero, &m).is_err(), "pool is validated");
     }
