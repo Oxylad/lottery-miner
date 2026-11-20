@@ -142,6 +142,11 @@ impl LogState {
             if let Some(hr) = bracketed_hashrate(line) {
                 self.hashrate = Some(hr);
             }
+        } else if let Some((acc, total)) = share_tally(line) {
+            // gpu-miner per-share verdict: "Accepted 1305/1306, 40 ms". The
+            // last number there is the reply time, not a count.
+            self.accepted = acc;
+            self.submitted = self.submitted.max(total);
         } else if line.starts_with("Submitted") {
             if let Some(n) = last_integer(line) {
                 self.submitted = n;
@@ -266,6 +271,14 @@ fn bracketed_hashrate(line: &str) -> Option<f64> {
     let open = line.find('(')?;
     let close = line[open..].find(')')? + open;
     parse_hashrate(&line[open + 1..close])
+}
+
+/// (accepted, total) from gpu-miner's "Accepted 5/6, 40 ms" or "Rejected 5/6: ..." lines.
+fn share_tally(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("Accepted ").or_else(|| line.strip_prefix("Rejected "))?;
+    let token = rest.split([',', ':', ' ']).next()?;
+    let (a, t) = token.split_once('/')?;
+    Some((a.parse().ok()?, t.parse().ok()?))
 }
 
 /// Last whitespace-separated token that parses as an integer.
@@ -466,6 +479,19 @@ mod tests {
         assert_eq!(st.hashrate, Some(16234.5));
         st.feed("[2026-11-16 17:04:00.000]  net      pool.supportxmr.com:443 error: \"connect error: timed out\"");
         assert!(st.last_error.unwrap().contains("connect error"));
+    }
+
+    #[test]
+    fn gpu_miner_share_verdict_lines() {
+        let mut st = LogState::default();
+        st.feed("                      Submitted          1306");
+        st.feed("                      Accepted           1290");
+        st.feed("[2026-11-20 14:00:00] Accepted 1305/1306, 40 ms");
+        assert_eq!(st.accepted, 1305);
+        assert_eq!(st.rejected(), 1);
+        st.feed("[2026-11-20 14:00:05] Rejected 1305/1307: [23,\"Stale\",null]");
+        assert_eq!(st.accepted, 1305);
+        assert_eq!(st.rejected(), 2);
     }
 
     #[test]
