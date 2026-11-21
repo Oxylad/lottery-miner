@@ -51,6 +51,42 @@ pub struct LogBook {
 
 pub type SharedLog = Arc<Mutex<LogBook>>;
 
+/// %LOCALAPPDATA%\lottery-miner\app.log, renamed to app.log.old at 5 MB.
+pub mod file {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    const MAX_BYTES: u64 = 5 * 1024 * 1024;
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    pub fn path() -> Option<std::path::PathBuf> {
+        std::env::var_os("LOCALAPPDATA").map(|d| std::path::Path::new(&d).join("lottery-miner").join("app.log"))
+    }
+
+    /// Best effort: a log file that cannot be written never stops the app.
+    pub fn append(at: f64, source: super::Source, text: &str) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(path) = path() else { return };
+        let Ok(_guard) = LOCK.lock() else { return };
+        if std::fs::metadata(&path).map(|m| m.len() >= MAX_BYTES).unwrap_or(false) {
+            let _ = std::fs::rename(&path, path.with_extension("log.old"));
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{} {} {}", super::utc_datetime(at), source.label(), text);
+        }
+    }
+
+    /// For startup steps before the logbook exists.
+    pub fn note(text: &str) {
+        append(super::now(), super::Source::App, text);
+    }
+}
+
 pub fn shared() -> SharedLog {
     Arc::new(Mutex::new(LogBook::default()))
 }
@@ -154,6 +190,11 @@ impl LogBook {
         }
         if self.lines.len() >= CAPACITY {
             self.lines.pop_front();
+        }
+        // The server's own journal keeps its lines; everything else also goes
+        // to a file so it survives the app.
+        if source != Source::Server {
+            file::append(at, source, &text);
         }
         self.lines.push_back(Line {
             source,

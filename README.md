@@ -167,6 +167,19 @@ Install on the server: copy the script to
   the network hashrate and block reward (moneroblocks.info) and the XMR price
   (CoinGecko).
 
+## Log file and running as administrator
+
+The app writes its log (app events and miner output, not the server's
+journal) to `%LOCALAPPDATA%\lottery-miner\app.log`, renamed to
+`app.log.old` at 5 MB, including startup steps and any panic.
+
+`deploy\windows\install-admin-task.ps1` (run once, approve the prompt)
+creates the scheduled task "Lottery Miner" that starts the app hidden and
+elevated at login with no UAC prompt and no time limit, and removes the
+normal login entry. Elevated, XMRig applies its MSR tweak (about 10-15% on
+RandomX). Leave "Start the app at login" off with the task, or two copies
+start.
+
 ## Grafana metrics (Prometheus)
 
 The app can push its stats every 15 s to a Prometheus Pushgateway, for the

@@ -199,7 +199,20 @@ fn spawn_tray_loop(tray: Tray, dashboard: Entity<Dashboard>, cx: &mut App) {
 
 fn main() {
     let start_hidden = std::env::args().any(|a| a == "--hidden");
+    // There is no console: keep panics in the log file.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        logbook::file::note(&format!("app: PANIC {info}"));
+        default_hook(info);
+    }));
+    logbook::file::note(&format!(
+        "app {} starting{}{}",
+        env!("CARGO_PKG_VERSION"),
+        if start_hidden { ", hidden" } else { "" },
+        if win::is_elevated() { ", as administrator" } else { "" },
+    ));
     Application::new().run(move |cx: &mut App| {
+        logbook::file::note("app: window system ready");
         input::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(980.), px(760.)), cx);
         let mut dashboard: Option<Entity<Dashboard>> = None;
@@ -235,6 +248,10 @@ fn main() {
                 entity
             },
         );
+        logbook::file::note(&format!("app: main window {}", if opened.is_ok() { "open" } else { "failed" }));
+        if let Err(e) = &opened {
+            logbook::file::note(&format!("app: could not open the main window: {e}"));
+        }
         let (Ok(_), Some(dashboard)) = (opened, dashboard) else {
             eprintln!("could not open the main window");
             cx.quit();

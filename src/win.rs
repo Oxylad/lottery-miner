@@ -130,3 +130,13 @@ pub fn open_in_notepad(path: &std::path::Path) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| format!("notepad: {e}"))
 }
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn IsUserAnAdmin() -> i32;
+}
+
+/// True when this process runs with administrator rights (elevated).
+pub fn is_elevated() -> bool {
+    unsafe { IsUserAnAdmin() != 0 }
+}

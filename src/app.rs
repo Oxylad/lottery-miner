@@ -179,6 +179,15 @@ impl Dashboard {
             }
             Err(e) => (Settings::default(), Some(format!("{e} (using defaults)"))),
         };
+        crate::logbook::file::note(&format!(
+            "app: settings {} {}",
+            settings_path.display(),
+            match &message {
+                Some(m) => format!("failed: {m}"),
+                None if settings_path.exists() => "loaded".to_string(),
+                None => "missing, using defaults".to_string(),
+            }
+        ));
         let form = Form::new(&settings, cx);
         let book = logbook::shared();
         let mut this = Self {
@@ -216,6 +225,7 @@ impl Dashboard {
             metrics_busy: false,
         };
         if this.settings.start_mining_on_launch {
+            crate::logbook::file::note(&format!("app: starting CPU mining ({}) on launch", this.settings.coin.label()));
             this.start_mining();
         }
         if this.settings.gpu.start_on_launch {
