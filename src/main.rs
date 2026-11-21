@@ -211,6 +211,15 @@ fn main() {
         if start_hidden { ", hidden" } else { "" },
         if win::is_elevated() { ", as administrator" } else { "" },
     ));
+    // Two copies would both mine, fight over the miner API ports and overwrite
+    // each other's Grafana metrics, so a second copy only shows the first.
+    if !win::claim_single_instance() {
+        logbook::file::note("app: another copy is already running, exiting");
+        if !start_hidden {
+            win::show_existing_window("Lottery Miner");
+        }
+        return;
+    }
     Application::new().run(move |cx: &mut App| {
         logbook::file::note("app: window system ready");
         input::bind_keys(cx);

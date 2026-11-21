@@ -37,6 +37,12 @@ guarantees that it works elsewhere.
 Settings live in `%APPDATA%\lottery-miner\settings.json` and are edited in
 the window.
 
+Only one copy runs at a time (per-user mutex
+`Local\LotteryMiner.SingleInstance`). Starting a second copy brings the first
+one's window up and exits; with `--hidden` it just exits. Two copies used to
+both mine, clash on the miner API ports and take turns overwriting the same
+Grafana metrics, which showed up as regular hashrate gaps.
+
 ## Build
 
 Needs Rust (rustup, stable MSVC toolchain) and Visual Studio Build Tools

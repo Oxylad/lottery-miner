@@ -131,6 +131,54 @@ pub fn open_in_notepad(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("notepad: {e}"))
 }
 
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CreateMutexW(attrs: *const core::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
+    fn GetLastError() -> u32;
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+}
+
+/// Claims the per-user "one copy of the app" mutex. Returns false when
+/// another copy already holds it. The handle is kept open (leaked) on purpose,
+/// so Windows releases it only when this process ends.
+///
+/// An elevated copy's mutex can deny a normal copy access
+/// (ERROR_ACCESS_DENIED); that also means another copy is running.
+pub fn claim_single_instance() -> bool {
+    claim_named_mutex("Local\\LotteryMiner.SingleInstance")
+}
+
+fn claim_named_mutex(name: &str) -> bool {
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    let name: Vec<u16> = name
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        let err = GetLastError();
+        if h == 0 {
+            // Could not create or open it: only treat access denied as "running".
+            return err != ERROR_ACCESS_DENIED;
+        }
+        err != ERROR_ALREADY_EXISTS
+    }
+}
+
+/// Best effort: brings the running copy's window to the front.
+pub fn show_existing_window(title: &str) {
+    let t: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), t.as_ptr()) };
+    if hwnd != 0 {
+        show_window(hwnd);
+    }
+}
+
 #[link(name = "shell32")]
 unsafe extern "system" {
     fn IsUserAnAdmin() -> i32;
@@ -139,4 +187,14 @@ unsafe extern "system" {
 /// True when this process runs with administrator rights (elevated).
 pub fn is_elevated() -> bool {
     unsafe { IsUserAnAdmin() != 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn second_claim_of_the_same_mutex_fails() {
+        let name = format!("Local\\LotteryMiner.Test.{}", std::process::id());
+        assert!(super::claim_named_mutex(&name), "first claim");
+        assert!(!super::claim_named_mutex(&name), "second claim");
+    }
 }
